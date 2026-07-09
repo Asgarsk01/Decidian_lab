@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "decidian-docling-lab"
+version = "0.1.0"
+description = "Local Docling parsing and output inspection harness for Decidian"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "docling==2.110.0",
+  "filelock==3.29.7",
+  "python-magic==0.4.27",
+  "streamlit==1.59.1",
+  "torch==2.13.0+cpu",
+  "torchvision==0.28.0+cpu",
+  "typer==0.24.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.0.2",
+  "pytest-cov==7.0.0",
+  "python-docx==1.2.0",
+  "reportlab==4.4.10",
+]
+
+[project.scripts]
+decidian-docling = "decidian_docling.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/decidian_docling"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+markers = [
+  "integration: requires Docling models and performs real document conversion",
+]
+
+[tool.coverage.run]
+source = ["decidian_docling"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]

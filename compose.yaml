@@ -1,0 +1,49 @@
+services:
+  docling-lab:
+    image: decidian-docling-lab:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./input:/data/input
+      - ./output:/data/output
+      - ./work:/data/work
+      - docling-models:/models
+    environment:
+      DECIDIAN_INPUT_DIR: /data/input
+      DECIDIAN_OUTPUT_DIR: /data/output
+      DECIDIAN_WORK_DIR: /data/work
+      HF_HOME: /models/huggingface
+      TORCH_HOME: /models/torch
+    deploy:
+      resources:
+        limits:
+          cpus: "6"
+          memory: 24G
+    restart: unless-stopped
+
+  cli:
+    image: decidian-docling-lab:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    profiles: ["tools"]
+    volumes:
+      - ./input:/data/input
+      - ./output:/data/output
+      - ./work:/data/work
+      - docling-models:/models
+    environment:
+      DECIDIAN_INPUT_DIR: /data/input
+      DECIDIAN_OUTPUT_DIR: /data/output
+      DECIDIAN_WORK_DIR: /data/work
+      HF_HOME: /models/huggingface
+      TORCH_HOME: /models/torch
+    entrypoint: ["decidian-docling"]
+
+volumes:
+  docling-models:
