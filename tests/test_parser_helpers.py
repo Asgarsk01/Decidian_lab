@@ -9,6 +9,7 @@ from decidian_docling.postprocess import (
     inject_picture_text,
     normalize_markdown_export,
 )
+from decidian_docling.parser import _model_dump, _remove_redundant_page_assets
 
 
 def test_normalize_markdown_export_decodes_common_entities() -> None:
@@ -285,3 +286,36 @@ def test_picture_text_enrichment_is_non_fatal(tmp_path) -> None:
     assert records == []
     assert (tmp_path / "picture_text.jsonl").read_text(encoding="utf-8") == ""
     assert any("unexpected error" in warning for warning in warnings)
+
+
+def test_ocr_residue_is_not_emitted(monkeypatch, tmp_path) -> None:
+    from decidian_docling import postprocess
+
+    image = tmp_path / "image.png"
+    image.write_bytes(b"not-a-real-image")
+
+    class Completed:
+        returncode = 0
+        stdout = "A\n"
+        stderr = ""
+
+    monkeypatch.setattr(postprocess.subprocess, "run", lambda *args, **kwargs: Completed())
+
+    assert postprocess._ocr_picture(image, {}, "tesseract", []) is None
+
+
+def test_model_dump_preserves_json_lists_and_page_asset_cleanup(tmp_path) -> None:
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    page_asset = assets / "page_000001.png"
+    picture_asset = assets / "image_000001.png"
+    page_asset.write_bytes(b"page-preview")
+    picture_asset.write_bytes(b"picture")
+
+    removed_count, removed_bytes = _remove_redundant_page_assets(assets, [])
+
+    assert removed_count == 1
+    assert removed_bytes == len(b"page-preview")
+    assert not page_asset.exists()
+    assert picture_asset.exists()
+    assert _model_dump({"times": [1.25, 2]}) == {"times": [1.25, 2]}

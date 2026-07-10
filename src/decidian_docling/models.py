@@ -12,11 +12,6 @@ class ParsingProfile(str, Enum):
     VISUAL = "visual"
 
 
-class ArtifactMode(str, Enum):
-    FULL = "full"
-    EXTRACTION = "extraction"
-
-
 class RunStatus(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
@@ -57,11 +52,6 @@ class RunResult:
     status: RunStatus
     manifest: dict[str, Any]
     warnings: list[str] = field(default_factory=list)
-
-    @property
-    def archive_path(self) -> Path:
-        return self.run_dir / "result.zip"
-
 
 @dataclass(frozen=True)
 class ValidatedInput:

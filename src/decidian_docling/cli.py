@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from .models import ArtifactMode, HarnessError, ParsingProfile, RunStatus
-from .parity import compare_run_parity
+from .models import HarnessError, ParsingProfile, RunStatus
 from .parser import DEFAULT_OUTPUT_DIR, parse_document
 from .validation import ALLOWED_EXTENSIONS
 
@@ -36,29 +34,16 @@ OutputOption = Annotated[
         dir_okay=True,
     ),
 ]
-ArtifactModeOption = Annotated[
-    ArtifactMode,
-    typer.Option(
-        "--artifact-mode",
-        "-a",
-        help="Artifact output mode: full or extraction.",
-        case_sensitive=False,
-    ),
-]
-
-
 def _run_one(
     input_file: Path,
     profile: ParsingProfile,
     output: Path,
-    artifact_mode: ArtifactMode,
 ) -> bool:
     try:
         result = parse_document(
             input_file,
             profile=profile,
             output_root=output,
-            artifact_mode=artifact_mode,
         )
     except HarnessError as exc:
         typer.secho(f"ERROR: {exc}", fg=typer.colors.RED, err=True)
@@ -77,10 +62,6 @@ def _run_one(
         bold=True,
     )
     typer.echo(f"Artifacts: {result.run_dir}")
-    if result.archive_path.exists():
-        typer.echo(f"Archive:   {result.archive_path}")
-    else:
-        typer.echo("Archive:   skipped")
     for warning in result.warnings:
         typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW)
     return result.status is not RunStatus.FAILED
@@ -100,10 +81,9 @@ def parse_command(
     ],
     profile: ProfileOption = ParsingProfile.STANDARD,
     output: OutputOption = DEFAULT_OUTPUT_DIR,
-    artifact_mode: ArtifactModeOption = ArtifactMode.FULL,
 ) -> None:
-    """Parse one document and export all inspection artifacts."""
-    if not _run_one(input_file, profile, output, artifact_mode):
+    """Parse one document and write the extraction artifact set."""
+    if not _run_one(input_file, profile, output):
         raise typer.Exit(code=1)
 
 
@@ -121,7 +101,6 @@ def batch_command(
     ],
     profile: ProfileOption = ParsingProfile.STANDARD,
     output: OutputOption = DEFAULT_OUTPUT_DIR,
-    artifact_mode: ArtifactModeOption = ArtifactMode.FULL,
 ) -> None:
     """Parse supported files in one directory sequentially."""
     files = sorted(
@@ -139,7 +118,7 @@ def batch_command(
 
     failures = 0
     for input_file in files:
-        if not _run_one(input_file, profile, output, artifact_mode):
+        if not _run_one(input_file, profile, output):
             failures += 1
 
     typer.echo(
@@ -148,37 +127,5 @@ def batch_command(
     )
     if failures:
         raise typer.Exit(code=1)
-
-
-@app.command("compare")
-def compare_command(
-    first_run: Annotated[
-        Path,
-        typer.Argument(
-            help="First immutable run directory.",
-            exists=True,
-            file_okay=False,
-            dir_okay=True,
-            readable=True,
-        ),
-    ],
-    second_run: Annotated[
-        Path,
-        typer.Argument(
-            help="Second immutable run directory.",
-            exists=True,
-            file_okay=False,
-            dir_okay=True,
-            readable=True,
-        ),
-    ],
-) -> None:
-    """Byte-compare extraction feed files from two run directories."""
-    result = compare_run_parity(first_run, second_run)
-    typer.echo(json.dumps(result, indent=2))
-    if not result["ok"]:
-        raise typer.Exit(code=1)
-
-
 if __name__ == "__main__":
     app()

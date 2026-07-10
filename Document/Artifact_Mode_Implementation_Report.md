@@ -1,156 +1,16 @@
-# Artifact Mode Implementation Report
+# Extraction Artifact Output Report
 
-## Summary
+## Current Design
 
-We added an artifact-mode layer to the local Docling harness so Decidian can
-produce either a full audit package or a smaller extraction package without
-changing parsing quality.
+The Docling laboratory now produces one extraction-focused output set. There is
+no artifact-mode selector in the browser UI, no `--artifact-mode` CLI option,
+and no full audit package code path.
 
-The central rule is:
+Parsing quality is unchanged. OCR, accurate table extraction, heading cleanup,
+picture-text enrichment, and chunking run exactly as before. Only non-essential
+exports have been removed.
 
-```text
-Full mode and extraction mode must use the same parse settings.
-Only export artifacts may differ.
-```
-
-That means OCR, table extraction, cell matching, heading hierarchy, image scale,
-picture text extraction, and Markdown cleanup remain identical between modes.
-
-## What Changed
-
-### Artifact Modes
-
-The app now supports two artifact modes:
-
-```text
-full
-extraction
-```
-
-`full` is the default and keeps the old behavior.
-
-`extraction` skips expensive debug artifacts while keeping the extraction feed
-intact.
-
-### Stage Timings
-
-`manifest.json` now includes a `stage_timings` object. Each stage records
-whether it ran and how long it took. Skipped extraction-mode stages are recorded
-with a `skipped_reason`, not fake zero-second timings.
-
-Example:
-
-```json
-{
-  "stage_timings": {
-    "docling_conversion": {
-      "ran": true,
-      "seconds": 123.45,
-      "native_timings_available": true
-    },
-    "page_image_export": {
-      "ran": false,
-      "skipped_reason": "artifact_mode=extraction"
-    },
-    "archive_zip": {
-      "ran": false,
-      "skipped_reason": "artifact_mode=extraction"
-    }
-  }
-}
-```
-
-Docling's native pipeline profiling is enabled around conversion. If Docling
-emits internal timings, they are stored under `conversion.timings`.
-
-### Repaired Table Evidence
-
-Continued-table repair now records structured repair metadata. When a table is
-stitched across pages, the harness can export pre-merge source fragment images
-under:
-
-```text
-repaired_table_evidence/
-```
-
-This avoids checking the parser against its own stitched result. The evidence
-shows the original fragments that caused the repair.
-
-### Parity Check
-
-A new CLI command compares the extraction feed files between two run folders:
-
-```powershell
-docker compose run --rm cli compare `
-  /data/output/full-run-dir `
-  /data/output/extraction-run-dir
-```
-
-It checks these files byte-for-byte:
-
-```text
-document.md
-document.json
-picture_text.jsonl
-```
-
-Those files are the core safety gate. If they differ between full and
-extraction mode for the same input and profile, extraction mode is touching
-parse behavior and should not be trusted until investigated.
-
-## Output After Implementation
-
-### Full Mode Output
-
-Full mode is for audit, debugging, and external verification.
-
-```text
-output/<safe-name>__<hash8>__<timestamp>/
-  manifest.json
-  evaluation.json
-
-  document.json
-  document.raw.md
-  document.md
-  document.txt
-  document.html
-  document_preview.html
-
-  chunks.jsonl
-  picture_text.jsonl
-
-  assets/
-
-  pages/
-    page-0001.png
-    page-0002.png
-    ...
-
-  pictures/
-    picture-0001.png
-    picture-0002.png
-    ...
-
-  tables/
-    table-0001.png
-    table-0001.csv
-    table-0001.html
-    ...
-
-  repaired_table_evidence/
-    repair-0001/
-      table-fragment-0012.png
-      table-fragment-0013.png
-      metadata.json
-
-  result.zip
-```
-
-`repaired_table_evidence/` appears only when a continued-table repair happened.
-
-### Extraction Mode Output
-
-Extraction mode is for future Decidian decision extraction.
+## Output Created for Every Run
 
 ```text
 output/<safe-name>__<hash8>__<timestamp>/
@@ -165,85 +25,60 @@ output/<safe-name>__<hash8>__<timestamp>/
   chunks.jsonl
   picture_text.jsonl
 
-  assets/
-
-  pictures/
-    picture-0001.png
-    picture-0002.png
-    ...
-
-  tables/
-    table-0001.csv
-    table-0001.html
-    ...
-
-  repaired_table_evidence/
-    repair-0001/
-      table-fragment-0012.png
-      table-fragment-0013.png
-      metadata.json
+  assets/                       # retained picture assets only
+  pictures/                     # diagram/image audit evidence
+  tables/                       # CSV and HTML table data
+  repaired_table_evidence/      # only when table repair happened
 ```
 
-Extraction mode skips:
+`document.md` is the future decision-extraction feed. It contains cleaned
+structure, repaired tables, and merged picture text. `document.json` remains
+the structured ground truth and `picture_text.jsonl` records the source and
+trust level of diagram-derived text.
+
+## Files Deliberately Not Created
 
 ```text
 pages/
+assets/page_*.png
 document.html
 document_preview.html
 normal unrepaired table PNGs
-automatic result.zip
+result.zip
 ```
 
-It keeps picture PNGs because diagram-derived text is now merged into
-`document.md`, and the cropped picture remains the cheapest audit evidence for
-that text.
+Generated page-preview assets are removed after all extraction artifacts have
+been created. This preserves picture PNGs and Markdown picture links while
+eliminating large per-page preview files. The VECV 127-page test showed these
+previews alone accounted for about 43 MB.
+
+## Timing and Evidence Rules
+
+`manifest.json` records harness stage timings and Docling native pipeline
+timings when available. Skipped exports are marked with `ran: false` and a
+reason, rather than being reported as zero seconds.
+
+Picture PNGs stay because they are the visual evidence for diagram text merged
+into `document.md`. Table-fragment images stay only when a continued-table
+repair happens, allowing the repaired row to be audited against its original
+fragments.
 
 ## How To Run
 
-Full mode:
+```powershell
+docker compose up --build -d docling-lab
+```
+
+Open [http://localhost:8501](http://localhost:8501), choose a parsing profile,
+upload a file, and select **Parse document**. The result directory is shown in
+the Summary tab.
+
+For CLI use:
 
 ```powershell
-docker compose run --rm cli parse /data/input/example.pdf `
-  --profile standard `
-  --artifact-mode full
+docker compose run --rm cli parse /data/input/example.pdf --profile standard
 ```
 
-Extraction mode:
-
-```powershell
-docker compose run --rm cli parse /data/input/example.pdf `
-  --profile standard `
-  --artifact-mode extraction
-```
-
-Compare two runs:
-
-```powershell
-docker compose run --rm cli compare `
-  /data/output/full-run-dir `
-  /data/output/extraction-run-dir
-```
-
-## Expected Timing Impact
-
-This change reduces export, image-write, preview, and ZIP overhead. It does not
-skip Docling's CPU conversion, OCR, accurate table extraction, heading analysis,
-picture text extraction, or chunking.
-
-For large PDFs, the likely improvement depends on the timing split:
-
-```text
-If Docling conversion dominates: modest improvement.
-If artifact export and ZIP dominate: larger improvement.
-```
-
-The new `stage_timings` data is the source of truth for future optimization.
-
-## Safety Rules
-
-1. `extraction` mode must not weaken parse settings.
-2. `image_scale` stays parse-affecting, not an export-only speed toggle.
-3. Picture PNGs stay because they verify diagram text that enters `document.md`.
-4. Normal table PNGs can be skipped, but repaired table source evidence stays.
-5. `document.md`, `document.json`, and `picture_text.jsonl` must match between
-   full and extraction mode for the same input/profile.
+There is no Full mode. The UI offers an on-demand **Prepare complete output
+ZIP** button, which packages every generated artifact in memory for browser
+download without saving a ZIP inside `output/`.

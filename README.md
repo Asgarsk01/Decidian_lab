@@ -9,11 +9,10 @@ The project provides:
 - A Typer CLI for repeatable single-file and batch parsing.
 - Shared validation and parsing logic used by both interfaces.
 - Standard, scanned-document, and visual-document parsing profiles.
-- Full and extraction artifact modes. Full mode creates every audit artifact.
-  Extraction mode keeps the same parse settings but skips expensive debug
-  exports.
+- One lean extraction artifact set containing only the files needed for
+  inspection and future LLM decision extraction.
 - Immutable local output folders with JSON, Markdown, text, chunks, picture
-  evidence, table data, diagnostics, evaluation data, and optional ZIP output.
+  evidence, table data, diagnostics, and evaluation data.
 
 Nothing is uploaded to R2, GCP, or another cloud service. No document content is
 sent to an LLM.
@@ -82,14 +81,14 @@ The service should show `healthy`. Open:
 ### 4. Parse a document
 
 1. Select `standard`, `scanned`, or `visual`.
-2. Select `full` or `extraction` artifact mode.
-3. Upload one supported local document.
-4. Select **Parse document**.
-5. Inspect the Summary, Markdown, HTML, JSON, Chunks, Tables, Pictures, Pages,
-   and Evaluation tabs. Some tabs are intentionally empty in extraction mode
-   because those debug artifacts are skipped.
-6. Record quality scores if required.
-7. Download the complete result ZIP when full mode generated one.
+2. Upload one supported local document.
+3. Select **Parse document**.
+4. Inspect the Summary, Markdown, JSON, Chunks, Tables, Pictures, and
+   Evaluation tabs. HTML and page-preview tabs are intentionally empty because
+   those large debug artifacts are not produced.
+5. Record quality scores if required.
+6. Select **Prepare complete output ZIP**, then download the generated ZIP. It
+   contains every artifact produced for that run and is created only on demand.
 
 Supported extensions:
 
@@ -136,39 +135,18 @@ enrichment, and code enrichment remain disabled.
 
 Use this for architecture documents, reports, charts, and image-heavy files.
 
-## Artifact modes
+## Extraction artifacts
 
-Artifact modes control what gets written after Docling has parsed the document.
-They do not change the parse settings. OCR, table mode, cell matching, heading
-hierarchy, image scale, and picture text extraction stay the same between modes.
-
-### `full`
-
-Full mode is the audit/debug package. It exports every inspection artifact:
-
-- JSON, raw Markdown, cleaned Markdown, text, HTML, embedded HTML preview
-- chunks and picture-text sidecar
-- page PNGs, picture PNGs, table PNGs, table CSV, table HTML
-- evaluation file and automatic `result.zip`
-
-Use this when checking parser quality, sending output for external audit, or
-visually comparing source pages against extracted content.
-
-### `extraction`
-
-Extraction mode is the faster package for future Decidian decision extraction.
-It keeps the extraction feed identical while skipping heavy visual/debug
-exports:
+Every run produces the same lean extraction artifact set. Parsing settings are
+unchanged: OCR, table mode, cell matching, heading hierarchy, image scale, and
+picture-text extraction remain enabled.
 
 - Keeps `document.md`, `document.json`, `document.raw.md`, `document.txt`,
   `chunks.jsonl`, `picture_text.jsonl`, `manifest.json`, `evaluation.json`,
   `pictures/`, table CSV, and table HTML.
-- Skips page PNGs, normal table PNGs, `document.html`,
-  `document_preview.html`, and automatic `result.zip`.
+- Skips page PNGs, generated page-preview assets, normal table PNGs,
+  `document.html`, `document_preview.html`, and persistent `result.zip` files.
 - Keeps table-fragment evidence only when a continued table was repaired.
-
-For the same input and parsing profile, full and extraction mode should produce
-byte-identical `document.md`, `document.json`, and `picture_text.jsonl`.
 
 ## CLI usage
 
@@ -179,14 +157,6 @@ Copy a document into `input/`, then parse it:
 
 ```powershell
 docker compose run --rm cli parse /data/input/example.pdf --profile standard
-```
-
-Use extraction artifact mode:
-
-```powershell
-docker compose run --rm cli parse /data/input/example.pdf `
-  --profile standard `
-  --artifact-mode extraction
 ```
 
 Choose a specific output directory:
@@ -202,16 +172,7 @@ Parse every supported document in `input/` sequentially:
 ```powershell
 docker compose run --rm cli batch /data/input `
   --profile standard `
-  --artifact-mode extraction `
   --output /data/output/batch-tests
-```
-
-Compare the extraction feed files from two run directories:
-
-```powershell
-docker compose run --rm cli compare `
-  /data/output/full-run-dir `
-  /data/output/extraction-run-dir
 ```
 
 Show command help:
@@ -240,15 +201,11 @@ manifest.json
 document.json
 document.md
 document.raw.md
-document.html
-document_preview.html
 document.txt
 chunks.jsonl
 picture_text.jsonl
 evaluation.json
-result.zip
 assets/
-pages/
 pictures/
 tables/
 repaired_table_evidence/
@@ -268,8 +225,6 @@ repaired_table_evidence/
   removes repeated page furniture using page provenance, conservatively repairs
   explicit continued-table rows, and restores structured text found inside
   picture regions.
-- `document.html` references exported local assets.
-- `document_preview.html` embeds images for convenient UI inspection.
 - `chunks.jsonl` contains HybridChunker output and source provenance.
 - `picture_text.jsonl` records the best available text for exported PDF picture
   regions. Records with `source: docling_structured` preserve Docling child-item
@@ -279,8 +234,8 @@ repaired_table_evidence/
 - `evaluation.json` begins as `pending` and is updated when UI scores are saved.
 - `repaired_table_evidence/` contains pre-merge table fragment images and
   metadata only when continued-table repair happened.
-- `result.zip` contains the complete run in full mode. Extraction mode skips it
-  unless a later workflow explicitly builds one.
+- The UI can create an in-memory ZIP download containing every generated run
+  artifact. It is not saved inside `output/`.
 
 Hybrid chunking uses `sentence-transformers/all-MiniLM-L6-v2`, peer merging,
 repeated table headers, and a strict maximum of 1,200 measured tokens.

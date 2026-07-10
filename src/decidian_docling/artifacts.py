@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from io import BytesIO
 import json
 import math
-import shutil
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from .models import EvaluationError
 
@@ -50,7 +51,7 @@ def read_json(path: Path) -> Any:
 def artifact_inventory(run_dir: Path) -> list[dict[str, Any]]:
     inventory: list[dict[str, Any]] = []
     for path in sorted(run_dir.rglob("*")):
-        if not path.is_file() or path.name == "result.zip":
+        if not path.is_file():
             continue
         inventory.append(
             {
@@ -61,20 +62,14 @@ def artifact_inventory(run_dir: Path) -> list[dict[str, Any]]:
     return inventory
 
 
-def build_archive(run_dir: Path) -> Path:
-    archive_path = run_dir / "result.zip"
-    temp_base = run_dir.parent / f".{run_dir.name}-archive"
-    temp_zip = Path(f"{temp_base}.zip")
-    if temp_zip.exists():
-        temp_zip.unlink()
-    shutil.make_archive(
-        str(temp_base),
-        "zip",
-        root_dir=run_dir,
-        base_dir=".",
-    )
-    temp_zip.replace(archive_path)
-    return archive_path
+def build_download_archive(run_dir: Path) -> bytes:
+    """Create an on-demand ZIP of the generated run without writing a ZIP file."""
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED, compresslevel=6) as bundle:
+        for path in sorted(run_dir.rglob("*")):
+            if path.is_file():
+                bundle.write(path, arcname=path.relative_to(run_dir).as_posix())
+    return buffer.getvalue()
 
 
 def initialize_evaluation(run_dir: Path) -> Path:
@@ -96,7 +91,6 @@ def save_evaluation(
     run_dir: Path,
     scores: dict[str, int],
     notes: str = "",
-    refresh_archive: bool = True,
 ) -> Path:
     missing = set(QUALITY_FIELDS) - set(scores)
     unexpected = set(scores) - set(QUALITY_FIELDS)
@@ -117,6 +111,4 @@ def save_evaluation(
     }
     output = run_dir / "evaluation.json"
     write_json(output, payload)
-    if refresh_archive:
-        build_archive(run_dir)
     return output

@@ -14,13 +14,11 @@ from filelock import FileLock, Timeout
 
 from .artifacts import (
     artifact_inventory,
-    build_archive,
     initialize_evaluation,
     write_json,
 )
 from .chunking import MAX_TOKENS, TOKENIZER_MODEL, build_chunks, write_chunks_jsonl
 from .models import (
-    ArtifactMode,
     ParseBusyError,
     ParsingProfile,
     RunResult,
@@ -64,12 +62,11 @@ def _base_manifest(
     source: ValidatedInput,
     profile_settings: Any,
     run_dir: Path,
-    artifact_mode: ArtifactMode,
 ) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "run_id": run_dir.name,
-        "artifact_mode": artifact_mode.value,
+        "artifact_mode": "extraction",
         "status": RunStatus.RUNNING.value,
         "started_at": _utc_now(),
         "completed_at": None,
@@ -126,11 +123,11 @@ def _model_dump(value: Any) -> Any:
         return _model_dump(value.model_dump(mode="json", exclude_none=True))
     if isinstance(value, dict):
         return {str(key): _model_dump(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_model_dump(item) for item in value]
+    if isinstance(value, (str, int, float, bool)):
+        return value
     return str(value)
-
-
-def _coerce_artifact_mode(value: ArtifactMode | str) -> ArtifactMode:
-    return value if isinstance(value, ArtifactMode) else ArtifactMode(value)
 
 
 def _mark_skipped(
@@ -163,21 +160,33 @@ def _run_stage(
     return result
 
 
-def _export_pages(document: Any, directory: Path, warnings: list[str]) -> int:
-    directory.mkdir(parents=True, exist_ok=True)
-    count = 0
-    for page_no, page in sorted(document.pages.items()):
+def _remove_redundant_page_assets(
+    assets_dir: Path,
+    warnings: list[str],
+) -> tuple[int, int]:
+    """Remove generated page previews after extraction artifacts are complete.
+
+    Docling stores page previews alongside picture assets when JSON uses
+    referenced images. The extraction output does not expose or consume page previews;
+    retained picture assets and the dedicated ``pictures/`` evidence directory
+    cover picture-text verification. Keep this cleanup deliberately narrow so
+    embedded document pictures (``image_*``) remain available to Markdown.
+    """
+    if not assets_dir.exists():
+        return 0, 0
+
+    removed_count = 0
+    removed_bytes = 0
+    for path in assets_dir.glob("page_*"):
+        if not path.is_file():
+            continue
         try:
-            image = getattr(page, "image", None)
-            pil_image = getattr(image, "pil_image", None)
-            if pil_image is None:
-                warnings.append(f"Page {page_no} has no generated preview image")
-                continue
-            pil_image.save(directory / f"page-{int(page_no):04d}.png", "PNG")
-            count += 1
-        except Exception as exc:
-            warnings.append(f"Could not export page {page_no}: {exc}")
-    return count
+            removed_bytes += path.stat().st_size
+            path.unlink()
+            removed_count += 1
+        except OSError as exc:
+            warnings.append(f"Could not remove extraction page asset {path.name}: {exc}")
+    return removed_count, removed_bytes
 
 
 def _export_items(
@@ -302,7 +311,6 @@ def _export_document(
     run_dir: Path,
     source_extension: str,
     warnings: list[str],
-    artifact_mode: ArtifactMode,
     stage_timings: dict[str, Any],
 ) -> tuple[dict[str, int], dict[str, Any]]:
     from docling_core.types.doc import ImageRefMode
@@ -348,35 +356,16 @@ def _export_document(
 
     _run_stage(stage_timings, "markdown_export", export_markdown)
 
-    if artifact_mode is ArtifactMode.FULL:
-        _run_stage(
-            stage_timings,
-            "html_export",
-            lambda: document.save_as_html(
-                run_dir / "document.html",
-                artifacts_dir=assets_dir,
-                image_mode=ImageRefMode.REFERENCED,
-            ),
-        )
-        _run_stage(
-            stage_timings,
-            "embedded_html_preview_export",
-            lambda: document.save_as_html(
-                run_dir / "document_preview.html",
-                image_mode=ImageRefMode.EMBEDDED,
-            ),
-        )
-    else:
-        _mark_skipped(
-            stage_timings,
-            "html_export",
-            "artifact_mode=extraction",
-        )
-        _mark_skipped(
-            stage_timings,
-            "embedded_html_preview_export",
-            "artifact_mode=extraction",
-        )
+    _mark_skipped(
+        stage_timings,
+        "html_export",
+        "not part of the extraction artifact set",
+    )
+    _mark_skipped(
+        stage_timings,
+        "embedded_html_preview_export",
+        "not part of the extraction artifact set",
+    )
 
     _run_stage(
         stage_timings,
@@ -387,19 +376,12 @@ def _export_document(
         ),
     )
 
-    if artifact_mode is ArtifactMode.FULL:
-        page_count = _run_stage(
-            stage_timings,
-            "page_image_export",
-            lambda: _export_pages(document, run_dir / "pages", warnings),
-        )
-    else:
-        page_count = 0
-        _mark_skipped(
-            stage_timings,
-            "page_image_export",
-            "artifact_mode=extraction",
-        )
+    page_count = 0
+    _mark_skipped(
+        stage_timings,
+        "page_image_export",
+        "not part of the extraction artifact set",
+    )
 
     element_count, table_count, picture_count, table_items = _run_stage(
         stage_timings,
@@ -417,18 +399,7 @@ def _export_document(
         for record in table_repair_records
         for number in record.get("table_numbers", [])
     }
-    if artifact_mode is ArtifactMode.FULL:
-        exported_table_images = _run_stage(
-            stage_timings,
-            "table_image_export",
-            lambda: _export_table_images(
-                document,
-                table_items,
-                run_dir / "tables",
-                warnings,
-            ),
-        )
-    elif repaired_table_numbers:
+    if repaired_table_numbers:
         exported_table_images = _run_stage(
             stage_timings,
             "table_image_export",
@@ -445,7 +416,7 @@ def _export_document(
         _mark_skipped(
             stage_timings,
             "table_image_export",
-            "artifact_mode=extraction and no repaired tables",
+            "no repaired tables",
         )
 
     if table_repair_records:
@@ -512,9 +483,17 @@ def _export_document(
 
     chunks, chunking_config = _run_stage(stage_timings, "chunking", export_chunks)
 
+    removed_page_assets, removed_page_asset_bytes = _run_stage(
+        stage_timings,
+        "page_asset_cleanup",
+        lambda: _remove_redundant_page_assets(run_dir / assets_dir, warnings),
+    )
+
     counts = {
         "pages": len(document.pages),
         "exported_page_images": page_count,
+        "removed_page_preview_assets": removed_page_assets,
+        "removed_page_preview_asset_bytes": removed_page_asset_bytes,
         "elements": element_count,
         "tables": table_count,
         "exported_table_images": exported_table_images,
@@ -538,15 +517,13 @@ def parse_document(
     input_path: Path,
     profile: ParsingProfile | str = ParsingProfile.STANDARD,
     output_root: Path = DEFAULT_OUTPUT_DIR,
-    artifact_mode: ArtifactMode | str = ArtifactMode.FULL,
 ) -> RunResult:
     source = validate_input(Path(input_path))
     settings = get_profile(profile)
-    mode = _coerce_artifact_mode(artifact_mode)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     run_dir = _make_run_dir(output_root, source)
-    manifest = _base_manifest(source, settings, run_dir, mode)
+    manifest = _base_manifest(source, settings, run_dir)
     manifest_path = run_dir / "manifest.json"
     write_json(manifest_path, manifest)
     initialize_evaluation(run_dir)
@@ -561,18 +538,11 @@ def parse_document(
         manifest["completed_at"] = _utc_now()
         manifest["warnings"].append("Another document is already being parsed")
         write_json(manifest_path, manifest)
-        if mode is ArtifactMode.FULL:
-            _run_stage(
-                stage_timings,
-                "archive_zip",
-                lambda: build_archive(run_dir),
-            )
-        else:
-            _mark_skipped(
-                stage_timings,
-                "archive_zip",
-                "artifact_mode=extraction",
-            )
+        _mark_skipped(
+            stage_timings,
+            "archive_zip",
+            "not part of the extraction artifact set",
+        )
         write_json(manifest_path, manifest)
         raise ParseBusyError(
             f"Another document is already being parsed. Diagnostics: {run_dir}"
@@ -644,7 +614,6 @@ def parse_document(
                 run_dir,
                 source.extension,
                 manifest["warnings"],
-                mode,
                 stage_timings,
             )
             manifest["counts"].update(counts)
@@ -670,18 +639,11 @@ def parse_document(
     manifest["duration_seconds"] = round(time.perf_counter() - started, 3)
     manifest["artifacts"] = artifact_inventory(run_dir)
     write_json(manifest_path, manifest)
-    if mode is ArtifactMode.FULL:
-        _run_stage(
-            stage_timings,
-            "archive_zip",
-            lambda: build_archive(run_dir),
-        )
-    else:
-        _mark_skipped(
-            stage_timings,
-            "archive_zip",
-            "artifact_mode=extraction",
-        )
+    _mark_skipped(
+        stage_timings,
+        "archive_zip",
+        "not part of the extraction artifact set",
+    )
     manifest["artifacts"] = artifact_inventory(run_dir)
     write_json(manifest_path, manifest)
     return RunResult(

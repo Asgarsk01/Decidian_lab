@@ -342,7 +342,7 @@ def _ocr_picture(
         warnings.append(f"Picture OCR failed for {image_path.name}: {detail}")
         return None
     text = _clean_ocr_text(completed.stdout)
-    if not text:
+    if not _has_useful_ocr_text(text):
         return None
     width, height = _picture_size(meta)
     return {
@@ -1010,6 +1010,16 @@ def _clean_ocr_text(text: str) -> str:
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
     lines = [line for line in lines if line]
     return "\n".join(lines)
+
+
+def _has_useful_ocr_text(text: str) -> bool:
+    """Reject obvious OCR residue without filtering short legitimate labels.
+
+    A single character (for example the isolated ``A`` from a decorative image)
+    adds no decision-extraction value and is low-trust noise. Two-character
+    identifiers such as ``DB`` and ``AI`` remain valid picture text.
+    """
+    return len(re.sub(r"\s+", "", text)) >= 2
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:

@@ -7,15 +7,14 @@ from pathlib import Path
 from typing import Iterable
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from decidian_docling.artifacts import (
     QUALITY_FIELDS,
+    build_download_archive,
     read_json,
     save_evaluation,
 )
 from decidian_docling.models import HarnessError, ParsingProfile, RunResult
-from decidian_docling.models import ArtifactMode
 from decidian_docling.parser import DEFAULT_OUTPUT_DIR, parse_document
 from decidian_docling.validation import ALLOWED_EXTENSIONS, sanitize_stem
 
@@ -47,7 +46,7 @@ def _show_file_preview(path: Path, language: str = "text") -> None:
     if truncated:
         st.warning(
             f"Preview limited to {PREVIEW_LIMIT:,} characters. "
-            "Use the result ZIP for the complete file."
+            "Prepare the download ZIP below for the complete file."
         )
 
 
@@ -90,12 +89,10 @@ def _render_result(result: RunResult) -> None:
         [
             "Summary",
             "Markdown",
-            "HTML",
             "JSON",
             "Chunks",
             "Tables",
             "Pictures",
-            "Pages",
             "Evaluation",
         ]
     )
@@ -115,17 +112,9 @@ def _render_result(result: RunResult) -> None:
             st.info("Markdown was not generated.")
 
     with tabs[2]:
-        html_path = run_dir / "document_preview.html"
-        if html_path.exists():
-            html, _ = _read_preview(html_path, limit=5_000_000)
-            components.html(html, height=760, scrolling=True)
-        else:
-            st.info("HTML was not generated.")
-
-    with tabs[3]:
         _show_file_preview(run_dir / "document.json", language="json")
 
-    with tabs[4]:
+    with tabs[3]:
         chunks_path = run_dir / "chunks.jsonl"
         if chunks_path.exists():
             lines = chunks_path.read_text(encoding="utf-8").splitlines()
@@ -147,7 +136,7 @@ def _render_result(result: RunResult) -> None:
         else:
             st.info("Chunks were not generated.")
 
-    with tabs[5]:
+    with tabs[4]:
         table_dir = run_dir / "tables"
         _show_images(
             sorted(table_dir.glob("*.png")) if table_dir.exists() else [],
@@ -160,21 +149,14 @@ def _render_result(result: RunResult) -> None:
 
                 st.dataframe(pd.read_csv(path), use_container_width=True)
 
-    with tabs[6]:
+    with tabs[5]:
         picture_dir = run_dir / "pictures"
         _show_images(
             sorted(picture_dir.glob("*.png")) if picture_dir.exists() else [],
             "No pictures were detected.",
         )
 
-    with tabs[7]:
-        page_dir = run_dir / "pages"
-        _show_images(
-            sorted(page_dir.glob("*.png")) if page_dir.exists() else [],
-            "No page previews were generated.",
-        )
-
-    with tabs[8]:
+    with tabs[6]:
         existing_path = run_dir / "evaluation.json"
         existing = read_json(existing_path) if existing_path.exists() else {}
         existing_scores = existing.get("scores", {})
@@ -226,18 +208,21 @@ def _render_result(result: RunResult) -> None:
                         run_dir,
                         {field: int(score) for field, score in scores.items()},
                         notes,
-                        refresh_archive=result.archive_path.exists(),
                     )
-                    if result.archive_path.exists():
-                        st.success("Evaluation saved and result ZIP refreshed.")
-                    else:
-                        st.success("Evaluation saved.")
+                    st.session_state.pop(f"download-archive-{run_dir.name}", None)
+                    st.success("Evaluation saved.")
                     st.rerun()
 
-    if result.archive_path.exists():
+    archive_key = f"download-archive-{run_dir.name}"
+    if st.button("Prepare complete output ZIP", use_container_width=True):
+        with st.spinner("Preparing ZIP from this run's generated output..."):
+            st.session_state[archive_key] = build_download_archive(run_dir)
+
+    archive_data = st.session_state.get(archive_key)
+    if isinstance(archive_data, bytes):
         st.download_button(
-            "Download complete result ZIP",
-            data=result.archive_path.read_bytes(),
+            "Download complete output ZIP",
+            data=archive_data,
             file_name=f"{run_dir.name}.zip",
             mime="application/zip",
             use_container_width=True,
@@ -270,24 +255,13 @@ def main() -> None:
             "Visual also enables picture classification and chart extraction."
         ),
     )
-    artifact_mode = st.selectbox(
-        "Artifact mode",
-        options=list(ArtifactMode),
-        format_func=lambda item: item.value.title(),
-        help=(
-            "Full creates every audit artifact and ZIP. Extraction keeps the same "
-            "parse settings but skips page previews, HTML previews, normal table "
-            "PNGs, and automatic ZIP."
-        ),
-    )
-
     if uploaded is not None:
         st.write(
             {
                 "filename": uploaded.name,
                 "size_mb": round(uploaded.size / (1024 * 1024), 2),
                 "profile": profile.value,
-                "artifact_mode": artifact_mode.value,
+                "artifact_mode": "extraction",
             }
         )
 
@@ -310,7 +284,6 @@ def main() -> None:
                     temp_path,
                     profile=profile,
                     output_root=DEFAULT_OUTPUT_DIR,
-                    artifact_mode=artifact_mode,
                 )
             st.session_state["latest_result"] = result
         except HarnessError as exc:
