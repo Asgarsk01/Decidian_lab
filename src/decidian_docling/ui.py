@@ -15,6 +15,7 @@ from decidian_docling.artifacts import (
     save_evaluation,
 )
 from decidian_docling.models import HarnessError, ParsingProfile, RunResult
+from decidian_docling.models import ArtifactMode
 from decidian_docling.parser import DEFAULT_OUTPUT_DIR, parse_document
 from decidian_docling.validation import ALLOWED_EXTENSIONS, sanitize_stem
 
@@ -225,8 +226,12 @@ def _render_result(result: RunResult) -> None:
                         run_dir,
                         {field: int(score) for field, score in scores.items()},
                         notes,
+                        refresh_archive=result.archive_path.exists(),
                     )
-                    st.success("Evaluation saved and result ZIP refreshed.")
+                    if result.archive_path.exists():
+                        st.success("Evaluation saved and result ZIP refreshed.")
+                    else:
+                        st.success("Evaluation saved.")
                     st.rerun()
 
     if result.archive_path.exists():
@@ -265,6 +270,16 @@ def main() -> None:
             "Visual also enables picture classification and chart extraction."
         ),
     )
+    artifact_mode = st.selectbox(
+        "Artifact mode",
+        options=list(ArtifactMode),
+        format_func=lambda item: item.value.title(),
+        help=(
+            "Full creates every audit artifact and ZIP. Extraction keeps the same "
+            "parse settings but skips page previews, HTML previews, normal table "
+            "PNGs, and automatic ZIP."
+        ),
+    )
 
     if uploaded is not None:
         st.write(
@@ -272,6 +287,7 @@ def main() -> None:
                 "filename": uploaded.name,
                 "size_mb": round(uploaded.size / (1024 * 1024), 2),
                 "profile": profile.value,
+                "artifact_mode": artifact_mode.value,
             }
         )
 
@@ -294,6 +310,7 @@ def main() -> None:
                     temp_path,
                     profile=profile,
                     output_root=DEFAULT_OUTPUT_DIR,
+                    artifact_mode=artifact_mode,
                 )
             st.session_state["latest_result"] = result
         except HarnessError as exc:

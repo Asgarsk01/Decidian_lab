@@ -179,12 +179,34 @@ def test_clean_markdown_repairs_explicit_continued_table() -> None:
         "tables": [table_a, table_b],
     }
     warnings: list[str] = []
+    repair_records: list[dict] = []
 
-    cleaned = clean_markdown_for_llm(markdown, document_data, warnings)
+    cleaned = clean_markdown_for_llm(
+        markdown,
+        document_data,
+        warnings,
+        repair_records,
+    )
 
     assert "| AI_CONFIDENCE_LOW | RAG query confidence score avg | < 0.70 over 30min | WARNING |" in cleaned
     assert cleaned.count("| Alert | Metric | Threshold | Severity |") == 1
     assert any("Repaired a continued table" in warning for warning in warnings)
+    assert repair_records == [
+        {
+            "repair_index": 1,
+            "table_indexes": [0, 1],
+            "table_numbers": [1, 2],
+            "pages": [10, 11],
+            "headers": ["Alert", "Metric", "Threshold", "Severity"],
+            "merged_row": [
+                "AI_CONFIDENCE_LOW",
+                "RAG query confidence score avg",
+                "< 0.70 over 30min",
+                "WARNING",
+            ],
+            "source": "native_table_continuation",
+        }
+    ]
 
 
 def test_structured_picture_text_prevents_unnecessary_ocr(tmp_path) -> None:

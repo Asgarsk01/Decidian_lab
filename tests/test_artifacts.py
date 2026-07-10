@@ -69,6 +69,16 @@ def test_save_evaluation_validates_scores(tmp_path: Path) -> None:
         save_evaluation(run_dir, invalid)
 
 
+def test_save_evaluation_can_skip_archive_refresh(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    scores = {field: 1 for field in QUALITY_FIELDS}
+
+    save_evaluation(run_dir, scores, refresh_archive=False)
+
+    assert not (run_dir / "result.zip").exists()
+
+
 def test_initialize_evaluation_marks_scores_pending(tmp_path: Path) -> None:
     path = initialize_evaluation(tmp_path)
     payload = read_json(path)

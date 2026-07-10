@@ -83,6 +83,7 @@ def clean_markdown_for_llm(
     markdown: str,
     document_data: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
+    table_repair_records: list[dict[str, Any]] | None = None,
 ) -> str:
     """Apply conservative Markdown cleanup for downstream LLM extraction."""
     warning_list = warnings if warnings is not None else []
@@ -97,6 +98,7 @@ def clean_markdown_for_llm(
             markdown,
             document_data,
             warning_list,
+            table_repair_records,
         )
     except Exception as exc:
         warning_list.append(
@@ -560,6 +562,7 @@ def _repair_native_table_continuations(
     markdown: str,
     document_data: dict[str, Any] | None,
     warnings: list[str],
+    repair_records: list[dict[str, Any]] | None = None,
 ) -> str:
     """Conservatively join table fragments only when row continuation is explicit."""
     if not document_data or not document_data.get("tables"):
@@ -612,6 +615,18 @@ def _repair_native_table_continuations(
         replacements[first.start] = _render_markdown_table(first.header, merged_rows)
         suppressed.update(range(first.start, first.end))
         suppressed.update(range(second.start, second.end))
+        if repair_records is not None:
+            repair_records.append(
+                {
+                    "repair_index": len(repair_records) + 1,
+                    "table_indexes": [index, index + 1],
+                    "table_numbers": [index + 1, index + 2],
+                    "pages": [page_a, page_b],
+                    "headers": list(first.header),
+                    "merged_row": list(merged_row),
+                    "source": "native_table_continuation",
+                }
+            )
         warnings.append(
             f"Repaired a continued table spanning pages {page_a} and {page_b}"
         )

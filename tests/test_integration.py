@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from decidian_docling.models import ParsingProfile, RunStatus
+from decidian_docling.models import ArtifactMode, ParsingProfile, RunStatus
+from decidian_docling.parity import compare_run_parity
 from decidian_docling.parser import parse_document
 
 from .fixture_factory import create_all_fixtures
@@ -67,3 +68,35 @@ def test_real_docling_exports(
         assert list((result.run_dir / "pages").glob("*.png"))
         assert list((result.run_dir / "tables").glob("*.csv"))
         assert list((result.run_dir / "pictures").glob("*.png"))
+
+
+def test_extraction_artifacts_preserve_feed_parity(
+    tmp_path: Path,
+    fixtures: dict[str, Path],
+) -> None:
+    full = parse_document(
+        fixtures["pdf"],
+        profile=ParsingProfile.STANDARD,
+        output_root=tmp_path / "output",
+        artifact_mode=ArtifactMode.FULL,
+    )
+    extraction = parse_document(
+        fixtures["pdf"],
+        profile=ParsingProfile.STANDARD,
+        output_root=tmp_path / "output",
+        artifact_mode=ArtifactMode.EXTRACTION,
+    )
+
+    assert full.status in {RunStatus.SUCCESS, RunStatus.PARTIAL_SUCCESS}
+    assert extraction.status in {RunStatus.SUCCESS, RunStatus.PARTIAL_SUCCESS}
+    assert compare_run_parity(full.run_dir, extraction.run_dir)["ok"] is True
+
+    assert (full.run_dir / "result.zip").is_file()
+    assert not (extraction.run_dir / "result.zip").exists()
+    assert list((full.run_dir / "pages").glob("*.png"))
+    assert not (extraction.run_dir / "pages").exists()
+    assert not (extraction.run_dir / "document.html").exists()
+    assert not (extraction.run_dir / "document_preview.html").exists()
+    assert list((extraction.run_dir / "pictures").glob("*.png"))
+    assert list((extraction.run_dir / "tables").glob("*.csv"))
+    assert extraction.manifest["stage_timings"]["archive_zip"]["ran"] is False

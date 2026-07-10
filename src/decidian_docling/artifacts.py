@@ -96,6 +96,7 @@ def save_evaluation(
     run_dir: Path,
     scores: dict[str, int],
     notes: str = "",
+    refresh_archive: bool = True,
 ) -> Path:
     missing = set(QUALITY_FIELDS) - set(scores)
     unexpected = set(scores) - set(QUALITY_FIELDS)
@@ -116,5 +117,6 @@ def save_evaluation(
     }
     output = run_dir / "evaluation.json"
     write_json(output, payload)
-    build_archive(run_dir)
+    if refresh_archive:
+        build_archive(run_dir)
     return output

@@ -12,6 +12,11 @@ class ParsingProfile(str, Enum):
     VISUAL = "visual"
 
 
+class ArtifactMode(str, Enum):
+    FULL = "full"
+    EXTRACTION = "extraction"
+
+
 class RunStatus(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
@@ -82,4 +87,3 @@ class ParseBusyError(HarnessError):
 
 class EvaluationError(HarnessError):
     """Raised when a manual evaluation payload is invalid."""
-

@@ -9,8 +9,11 @@ The project provides:
 - A Typer CLI for repeatable single-file and batch parsing.
 - Shared validation and parsing logic used by both interfaces.
 - Standard, scanned-document, and visual-document parsing profiles.
-- Immutable local output folders with JSON, Markdown, HTML, text, chunks,
-  images, tables, diagnostics, evaluation data, and a downloadable ZIP.
+- Full and extraction artifact modes. Full mode creates every audit artifact.
+  Extraction mode keeps the same parse settings but skips expensive debug
+  exports.
+- Immutable local output folders with JSON, Markdown, text, chunks, picture
+  evidence, table data, diagnostics, evaluation data, and optional ZIP output.
 
 Nothing is uploaded to R2, GCP, or another cloud service. No document content is
 sent to an LLM.
@@ -79,12 +82,14 @@ The service should show `healthy`. Open:
 ### 4. Parse a document
 
 1. Select `standard`, `scanned`, or `visual`.
-2. Upload one supported local document.
-3. Select **Run parsing**.
-4. Inspect the Summary, Markdown, HTML, JSON, Chunks, Tables, Pictures, Pages,
-   and Evaluation tabs.
-5. Record quality scores if required.
-6. Download the complete result ZIP.
+2. Select `full` or `extraction` artifact mode.
+3. Upload one supported local document.
+4. Select **Parse document**.
+5. Inspect the Summary, Markdown, HTML, JSON, Chunks, Tables, Pictures, Pages,
+   and Evaluation tabs. Some tabs are intentionally empty in extraction mode
+   because those debug artifacts are skipped.
+6. Record quality scores if required.
+7. Download the complete result ZIP when full mode generated one.
 
 Supported extensions:
 
@@ -131,6 +136,40 @@ enrichment, and code enrichment remain disabled.
 
 Use this for architecture documents, reports, charts, and image-heavy files.
 
+## Artifact modes
+
+Artifact modes control what gets written after Docling has parsed the document.
+They do not change the parse settings. OCR, table mode, cell matching, heading
+hierarchy, image scale, and picture text extraction stay the same between modes.
+
+### `full`
+
+Full mode is the audit/debug package. It exports every inspection artifact:
+
+- JSON, raw Markdown, cleaned Markdown, text, HTML, embedded HTML preview
+- chunks and picture-text sidecar
+- page PNGs, picture PNGs, table PNGs, table CSV, table HTML
+- evaluation file and automatic `result.zip`
+
+Use this when checking parser quality, sending output for external audit, or
+visually comparing source pages against extracted content.
+
+### `extraction`
+
+Extraction mode is the faster package for future Decidian decision extraction.
+It keeps the extraction feed identical while skipping heavy visual/debug
+exports:
+
+- Keeps `document.md`, `document.json`, `document.raw.md`, `document.txt`,
+  `chunks.jsonl`, `picture_text.jsonl`, `manifest.json`, `evaluation.json`,
+  `pictures/`, table CSV, and table HTML.
+- Skips page PNGs, normal table PNGs, `document.html`,
+  `document_preview.html`, and automatic `result.zip`.
+- Keeps table-fragment evidence only when a continued table was repaired.
+
+For the same input and parsing profile, full and extraction mode should produce
+byte-identical `document.md`, `document.json`, and `picture_text.jsonl`.
+
 ## CLI usage
 
 The repository maps the host `input/` directory to `/data/input` in the
@@ -140,6 +179,14 @@ Copy a document into `input/`, then parse it:
 
 ```powershell
 docker compose run --rm cli parse /data/input/example.pdf --profile standard
+```
+
+Use extraction artifact mode:
+
+```powershell
+docker compose run --rm cli parse /data/input/example.pdf `
+  --profile standard `
+  --artifact-mode extraction
 ```
 
 Choose a specific output directory:
@@ -155,7 +202,16 @@ Parse every supported document in `input/` sequentially:
 ```powershell
 docker compose run --rm cli batch /data/input `
   --profile standard `
+  --artifact-mode extraction `
   --output /data/output/batch-tests
+```
+
+Compare the extraction feed files from two run directories:
+
+```powershell
+docker compose run --rm cli compare `
+  /data/output/full-run-dir `
+  /data/output/extraction-run-dir
 ```
 
 Show command help:
@@ -195,10 +251,16 @@ assets/
 pages/
 pictures/
 tables/
+repaired_table_evidence/
 ```
 
 - `manifest.json` records the source hash, parsing profile, package/model
-  versions, status, timings, warnings, errors, counts, and artifact inventory.
+  versions, artifact mode, status, timings, warnings, errors, counts, and
+  artifact inventory.
+- `stage_timings` inside `manifest.json` records harness stages with `ran`,
+  `seconds`, and `skipped_reason` fields. Docling native pipeline timings are
+  enabled during conversion and stored under `conversion.timings` when Docling
+  emits them.
 - `document.json` is the lossless Docling representation.
 - `document.raw.md` is Docling Markdown with only basic entity cleanup.
 - `document.md` is the cleaned Markdown intended for review and future LLM
@@ -215,7 +277,10 @@ tables/
   only as a fallback and produces `source: tesseract_ocr`, labelled low trust.
   Both remain supporting visual context rather than authoritative requirements.
 - `evaluation.json` begins as `pending` and is updated when UI scores are saved.
-- `result.zip` contains the complete run.
+- `repaired_table_evidence/` contains pre-merge table fragment images and
+  metadata only when continued-table repair happened.
+- `result.zip` contains the complete run in full mode. Extraction mode skips it
+  unless a later workflow explicitly builds one.
 
 Hybrid chunking uses `sentence-transformers/all-MiniLM-L6-v2`, peer merging,
 repeated table headers, and a strict maximum of 1,200 measured tokens.
