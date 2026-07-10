@@ -183,10 +183,12 @@ Typical contents:
 manifest.json
 document.json
 document.md
+document.raw.md
 document.html
 document_preview.html
 document.txt
 chunks.jsonl
+picture_text.jsonl
 evaluation.json
 result.zip
 assets/
@@ -198,9 +200,14 @@ tables/
 - `manifest.json` records the source hash, parsing profile, package/model
   versions, status, timings, warnings, errors, counts, and artifact inventory.
 - `document.json` is the lossless Docling representation.
-- `document.md` and `document.html` reference exported local assets.
+- `document.raw.md` is Docling Markdown with only basic entity cleanup.
+- `document.md` is the cleaned Markdown intended for review and future LLM
+  extraction; PDF runs may include repaired borderless tables and image OCR
+  notes.
+- `document.html` references exported local assets.
 - `document_preview.html` embeds images for convenient UI inspection.
 - `chunks.jsonl` contains HybridChunker output and source provenance.
+- `picture_text.jsonl` is best-effort OCR text for large exported PDF images.
 - `evaluation.json` begins as `pending` and is updated when UI scores are saved.
 - `result.zip` contains the complete run.
 

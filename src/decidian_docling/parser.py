@@ -24,6 +24,12 @@ from .models import (
     RunStatus,
     ValidatedInput,
 )
+from .postprocess import (
+    clean_markdown_for_llm,
+    extract_picture_ocr,
+    inject_picture_ocr,
+    normalize_markdown_export,
+)
 from .profiles import build_pdf_pipeline_options, get_profile
 from .validation import MAX_FILE_SIZE, validate_input
 
@@ -33,11 +39,6 @@ MAX_NUM_PAGES = 500
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def normalize_markdown_export(markdown: str) -> str:
-    """Clean Docling Markdown for downstream review and LLM extraction."""
-    return markdown.replace("&amp;", "&")
 
 
 def _make_run_dir(output_root: Path, source: ValidatedInput) -> Path:
@@ -194,6 +195,7 @@ def _export_items(
 def _export_document(
     conversion_result: Any,
     run_dir: Path,
+    source_extension: str,
     warnings: list[str],
 ) -> tuple[dict[str, int], dict[str, Any]]:
     from docling_core.types.doc import ImageRefMode
@@ -205,16 +207,18 @@ def _export_document(
         artifacts_dir=assets_dir,
         image_mode=ImageRefMode.REFERENCED,
     )
+    raw_markdown_path = run_dir / "document.raw.md"
     markdown_path = run_dir / "document.md"
     document.save_as_markdown(
-        markdown_path,
+        raw_markdown_path,
         artifacts_dir=assets_dir,
         image_mode=ImageRefMode.REFERENCED,
     )
-    markdown_path.write_text(
-        normalize_markdown_export(markdown_path.read_text(encoding="utf-8")),
-        encoding="utf-8",
+    raw_markdown = normalize_markdown_export(
+        raw_markdown_path.read_text(encoding="utf-8")
     )
+    raw_markdown_path.write_text(raw_markdown, encoding="utf-8")
+    markdown_path.write_text(clean_markdown_for_llm(raw_markdown), encoding="utf-8")
     document.save_as_html(
         run_dir / "document.html",
         artifacts_dir=assets_dir,
@@ -236,6 +240,21 @@ def _export_document(
         run_dir / "tables",
         warnings,
     )
+    picture_ocr_records = []
+    if source_extension == ".pdf" and picture_count:
+        picture_ocr_records = extract_picture_ocr(
+            run_dir / "pictures",
+            run_dir / "document.json",
+            run_dir / "picture_text.jsonl",
+            warnings,
+        )
+        markdown_path.write_text(
+            inject_picture_ocr(
+                markdown_path.read_text(encoding="utf-8"),
+                picture_ocr_records,
+            ),
+            encoding="utf-8",
+        )
     chunks, chunking_config = build_chunks(document)
     write_chunks_jsonl(run_dir / "chunks.jsonl", chunks)
 
@@ -245,6 +264,7 @@ def _export_document(
         "elements": element_count,
         "tables": table_count,
         "pictures": picture_count,
+        "picture_ocr_items": len(picture_ocr_records),
         "chunks": len(chunks),
     }
     return counts, chunking_config
@@ -321,6 +341,7 @@ def parse_document(
             counts, chunking_config = _export_document(
                 conversion_result,
                 run_dir,
+                source.extension,
                 manifest["warnings"],
             )
             manifest["counts"].update(counts)
