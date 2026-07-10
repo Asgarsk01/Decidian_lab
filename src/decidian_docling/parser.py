@@ -35,6 +35,11 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def normalize_markdown_export(markdown: str) -> str:
+    """Clean Docling Markdown for downstream review and LLM extraction."""
+    return markdown.replace("&amp;", "&")
+
+
 def _make_run_dir(output_root: Path, source: ValidatedInput) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     run_dir = output_root.resolve() / (
@@ -200,10 +205,15 @@ def _export_document(
         artifacts_dir=assets_dir,
         image_mode=ImageRefMode.REFERENCED,
     )
+    markdown_path = run_dir / "document.md"
     document.save_as_markdown(
-        run_dir / "document.md",
+        markdown_path,
         artifacts_dir=assets_dir,
         image_mode=ImageRefMode.REFERENCED,
+    )
+    markdown_path.write_text(
+        normalize_markdown_export(markdown_path.read_text(encoding="utf-8")),
+        encoding="utf-8",
     )
     document.save_as_html(
         run_dir / "document.html",

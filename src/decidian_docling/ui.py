@@ -187,13 +187,29 @@ def _render_result(result: RunResult) -> None:
             "chunk_quality": "Chunk quality",
         }
         with st.form(f"evaluation-{run_dir.name}"):
-            scores: dict[str, int] = {}
+            status = existing.get("status", "pending")
+            if status != "completed":
+                st.info(
+                    "Evaluation is not saved yet. Set every field explicitly, "
+                    "then click Save evaluation before downloading the ZIP."
+                )
+            scores: dict[str, int | None] = {}
             for field in QUALITY_FIELDS:
                 stored_score = existing_scores.get(field)
-                scores[field] = st.select_slider(
+                scores[field] = st.selectbox(
                     labels[field],
-                    options=[0, 1, 2],
-                    value=stored_score if stored_score in {0, 1, 2} else 1,
+                    options=[None, 0, 1, 2],
+                    index=(
+                        [None, 0, 1, 2].index(stored_score)
+                        if stored_score in {0, 1, 2}
+                        else 0
+                    ),
+                    format_func=lambda value: (
+                        "Unscored"
+                        if value is None
+                        else f"{value} — "
+                        + {0: "broken", 1: "partial", 2: "correct"}[value]
+                    ),
                     help="0 = broken, 1 = partial, 2 = correct",
                 )
             notes = st.text_area(
@@ -202,8 +218,16 @@ def _render_result(result: RunResult) -> None:
                 placeholder="Record missing text, broken tables, OCR issues, etc.",
             )
             if st.form_submit_button("Save evaluation"):
-                save_evaluation(run_dir, scores, notes)
-                st.success("Evaluation saved and result ZIP refreshed.")
+                if any(score is None for score in scores.values()):
+                    st.error("Score every evaluation field before saving.")
+                else:
+                    save_evaluation(
+                        run_dir,
+                        {field: int(score) for field, score in scores.items()},
+                        notes,
+                    )
+                    st.success("Evaluation saved and result ZIP refreshed.")
+                    st.rerun()
 
     if result.archive_path.exists():
         st.download_button(
