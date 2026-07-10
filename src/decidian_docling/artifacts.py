@@ -64,7 +64,7 @@ def artifact_inventory(run_dir: Path) -> list[dict[str, Any]]:
 def build_archive(run_dir: Path) -> Path:
     archive_path = run_dir / "result.zip"
     temp_base = run_dir.parent / f".{run_dir.name}-archive"
-    temp_zip = temp_base.with_suffix(".zip")
+    temp_zip = Path(f"{temp_base}.zip")
     if temp_zip.exists():
         temp_zip.unlink()
     shutil.make_archive(

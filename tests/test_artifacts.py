@@ -35,6 +35,18 @@ def test_json_and_archive_round_trip(tmp_path: Path) -> None:
         assert "result.zip" not in bundle.namelist()
 
 
+def test_archive_handles_run_names_with_dots(tmp_path: Path) -> None:
+    run_dir = tmp_path / "CP_SuperAdminFlow_SRS-V1.1__ef883d3a__20260710T064320008950Z"
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text('{"status":"success"}', encoding="utf-8")
+
+    archive = build_archive(run_dir)
+
+    assert archive == run_dir / "result.zip"
+    assert archive.exists()
+    assert not (tmp_path / ".CP_SuperAdminFlow_SRS-V1.zip").exists()
+
+
 def test_json_replaces_non_finite_numbers(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     write_json(path, {"score": float("nan"), "nested": [float("inf")]})
