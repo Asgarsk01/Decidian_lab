@@ -62,6 +62,7 @@ MAX_OCR_PICTURES = 40
 class HeadingContext:
     levels: dict[str, tuple[int, ...]]
     furniture: frozenset[str]
+    code_starts: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ def clean_markdown_for_llm(
     document_data: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
     table_repair_records: list[dict[str, Any]] | None = None,
+    table_header_repair_records: list[dict[str, str]] | None = None,
 ) -> str:
     """Apply conservative Markdown cleanup for downstream LLM extraction."""
     warning_list = warnings if warnings is not None else []
@@ -103,6 +105,15 @@ def clean_markdown_for_llm(
     except Exception as exc:
         warning_list.append(
             f"Continued-table repair skipped after unexpected error: {exc}"
+        )
+    try:
+        markdown = _repair_table_header_fragments(
+            markdown,
+            table_header_repair_records,
+        )
+    except Exception as exc:
+        warning_list.append(
+            f"Table-header repair skipped after unexpected error: {exc}"
         )
     try:
         markdown = _repair_borderless_tables(markdown)
@@ -377,6 +388,11 @@ def _build_heading_context(
         return None
 
     levels: dict[str, list[int]] = defaultdict(list)
+    code_starts = {
+        _text_signature(str(item.get("text", "")).splitlines()[0])
+        for item in document_data.get("texts", [])
+        if item.get("label") == "code" and str(item.get("text", "")).strip()
+    }
     furniture = {
         _text_signature(str(item.get("text", "")))
         for item in document_data.get("texts", [])
@@ -400,6 +416,7 @@ def _build_heading_context(
     return HeadingContext(
         levels={key: tuple(value) for key, value in levels.items()},
         furniture=frozenset(furniture),
+        code_starts=frozenset(signature for signature in code_starts if signature),
     )
 
 
@@ -414,7 +431,14 @@ def _clean_heading_lines(
             in_fence = not in_fence
             output.append(line)
             continue
-        output.append(line if in_fence else _clean_heading_line(line, context))
+        code_literal = _escape_document_code_heading(line, context)
+        output.append(
+            code_literal
+            if code_literal is not None
+            else line
+            if in_fence
+            else _clean_heading_line(line, context)
+        )
     return "\n".join(output)
 
 
@@ -432,6 +456,8 @@ def _clean_heading_line(
     signature = _text_signature(text)
     if context is not None and signature in context.furniture:
         return ""
+    if context is not None and _is_code_heading(text, context):
+        return rf"\# {text}"
 
     if text.lower().startswith("of "):
         return rf"\# {text}"
@@ -456,6 +482,21 @@ def _clean_heading_line(
     if level is None:
         level = min(len(hashes), MAX_HEADING_LEVEL)
     return f"{'#' * level} {text}"
+
+
+def _escape_document_code_heading(
+    line: str,
+    context: HeadingContext | None,
+) -> str | None:
+    if context is None:
+        return None
+    match = re.match(r"^(#{1,10})\s+(.*)$", line)
+    if match is None:
+        return None
+    _hashes, text = match.groups()
+    if not _is_code_heading(text.strip(), context):
+        return None
+    return rf"\# {text.strip()}"
 
 
 def _format_numbered_heading(text: str) -> str | None:
@@ -486,6 +527,21 @@ def _document_heading_level(
     return min(
         (level for level, count in counts.items() if count == max(counts.values())),
         default=None,
+    )
+
+
+def _is_code_heading(text: str, context: HeadingContext) -> bool:
+    """Demote a Docling Markdown heading that starts a source-code item.
+
+    Some PDF code blocks are exported as a short fenced fragment followed by
+    an unfenced line beginning with ``#``. The document JSON keeps the reliable
+    ``code`` label, so only an exact start of such an item is escaped here.
+    Genuine Markdown headings that happen to contain code-like words are not
+    affected.
+    """
+    signature = _text_signature(text)
+    return len(signature) >= 12 and any(
+        code_start.startswith(signature) for code_start in context.code_starts
     )
 
 
@@ -780,6 +836,51 @@ def _table_bbox(table: dict[str, Any]) -> dict[str, Any] | None:
     return bbox if isinstance(bbox, dict) else None
 
 
+def _repair_table_header_fragments(
+    markdown: str,
+    repair_records: list[dict[str, str]] | None = None,
+) -> str:
+    """Join a one-letter lowercase line-wrap fragment in a table header.
+
+    PDF table extraction can split a narrow header such as ``Threshol d``.
+    The rule deliberately excludes uppercase suffixes, digits, and multiword
+    headers, so labels such as ``Model A`` and ``Analytics (BQ)`` stay intact.
+    """
+    lines = markdown.splitlines()
+    replacements: dict[int, str] = {}
+    for block in _find_markdown_table_blocks(lines):
+        repaired_header = tuple(_join_header_fragment(cell) for cell in block.header)
+        if repaired_header == block.header:
+            continue
+        replacements[block.start] = _render_markdown_header(repaired_header)
+        if repair_records is not None:
+            repair_records.extend(
+                {
+                    "original": original,
+                    "normalized": normalized,
+                }
+                for original, normalized in zip(block.header, repaired_header)
+                if original != normalized
+            )
+
+    if not replacements:
+        return markdown
+    return "\n".join(
+        replacements.get(index, line) for index, line in enumerate(lines)
+    ).rstrip() + "\n"
+
+
+def _join_header_fragment(cell: str) -> str:
+    match = re.fullmatch(r"([A-Z][A-Za-z]{3,})\s+([a-z])", cell.strip())
+    if match is None:
+        return cell
+    return f"{match.group(1)}{match.group(2)}"
+
+
+def _render_markdown_header(header: tuple[str, ...]) -> str:
+    return "| " + " | ".join(_escape_table_cell(cell) for cell in header) + " |"
+
+
 def _repair_borderless_tables(markdown: str) -> str:
     lines = markdown.splitlines()
     output: list[str] = []
@@ -1008,7 +1109,7 @@ def _page_number(meta: dict[str, Any]) -> int | None:
 
 def _clean_ocr_text(text: str) -> str:
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-    lines = [line for line in lines if line]
+    lines = [line for line in lines if _is_useful_ocr_line(line)]
     return "\n".join(lines)
 
 
@@ -1020,6 +1121,16 @@ def _has_useful_ocr_text(text: str) -> bool:
     identifiers such as ``DB`` and ``AI`` remain valid picture text.
     """
     return len(re.sub(r"\s+", "", text)) >= 2
+
+
+def _is_useful_ocr_line(line: str) -> bool:
+    """Keep meaningful UI labels while dropping isolated OCR residue."""
+    compact = re.sub(r"\s+", "", line)
+    if len(compact) < 2 or not re.search(r"[A-Za-z0-9]", compact):
+        return False
+    # Lowercase two-character fragments occur frequently around icons and
+    # borders. Uppercase abbreviations such as AI, IO, and QA remain valid.
+    return compact not in {"an", "oo"}
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:

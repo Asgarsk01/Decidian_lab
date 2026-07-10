@@ -98,6 +98,101 @@ def build_chunks(document: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     return chunks, config
 
 
+def build_picture_supplement_chunks(
+    records: Iterable[dict[str, Any]],
+    tokenizer: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Create searchable, provenance-labelled chunks for injected picture text."""
+    if tokenizer is None:
+        from docling_core.transforms.chunker.tokenizer.huggingface import (
+            HuggingFaceTokenizer,
+        )
+
+        tokenizer = HuggingFaceTokenizer.from_pretrained(
+            model_name=TOKENIZER_MODEL,
+            max_tokens=MAX_TOKENS,
+            model_max_length=1_000_000,
+        )
+
+    supplements: list[dict[str, Any]] = []
+    for record in records:
+        text = str(record.get("text", "")).strip()
+        if not text:
+            continue
+        headings = [
+            str(item.get("text", "")).strip()
+            for item in record.get("items", []) or []
+            if item.get("label") == "section_header" and item.get("text")
+        ]
+        source_refs = _picture_source_refs(record)
+        location = []
+        if record.get("page_number") is not None:
+            location.append(f"page {record['page_number']}")
+        if record.get("picture_file"):
+            location.append(str(record["picture_file"]))
+        source = str(record.get("source", "tesseract_ocr"))
+        trust = str(record.get("trust", "low"))
+        prefix = "Picture text"
+        if location:
+            prefix += f" ({', '.join(location)})"
+        contextualized = "\n".join(
+            [
+                *headings,
+                f"{prefix} — {source}, {trust} trust.",
+                text,
+            ]
+        )
+        payload = {
+            "index": 0,
+            "text": text,
+            "contextualized_text": contextualized,
+            "headings": headings,
+            "captions": [],
+            "page_numbers": (
+                [int(record["page_number"])]
+                if isinstance(record.get("page_number"), (int, float))
+                else []
+            ),
+            "source_refs": source_refs,
+            "token_count": tokenizer.count_tokens(contextualized),
+            "origin": "picture_text",
+            "picture_file": record.get("picture_file"),
+            "asset_uri": record.get("asset_uri"),
+            "source": source,
+            "trust": trust,
+        }
+        supplements.extend(enforce_chunk_limit(payload, tokenizer, MAX_TOKENS))
+
+    for index, payload in enumerate(supplements):
+        payload["index"] = index
+    return supplements
+
+
+def _picture_source_refs(record: dict[str, Any]) -> list[dict[str, Any]]:
+    items = record.get("items", []) or []
+    refs = [
+        {
+            "self_ref": str(item.get("self_ref", "")),
+            "label": item.get("label"),
+            "provenance": item.get("provenance", []),
+        }
+        for item in items
+    ]
+    if refs:
+        return refs
+    return [
+        {
+            "self_ref": str(record.get("asset_uri", "")),
+            "label": "picture",
+            "provenance": (
+                [{"page_no": int(record["page_number"])}]
+                if isinstance(record.get("page_number"), (int, float))
+                else []
+            ),
+        }
+    ]
+
+
 def enforce_chunk_limit(
     payload: dict[str, Any],
     tokenizer: Any,

@@ -17,7 +17,13 @@ from .artifacts import (
     initialize_evaluation,
     write_json,
 )
-from .chunking import MAX_TOKENS, TOKENIZER_MODEL, build_chunks, write_chunks_jsonl
+from .chunking import (
+    MAX_TOKENS,
+    TOKENIZER_MODEL,
+    build_chunks,
+    build_picture_supplement_chunks,
+    write_chunks_jsonl,
+)
 from .models import (
     ParseBusyError,
     ParsingProfile,
@@ -333,6 +339,7 @@ def _export_document(
     markdown_path = run_dir / "document.md"
 
     table_repair_records: list[dict[str, Any]] = []
+    table_header_repair_records: list[dict[str, str]] = []
 
     def export_markdown() -> None:
         document.save_as_markdown(
@@ -350,6 +357,7 @@ def _export_document(
                 document_data if source_extension == ".pdf" else None,
                 warnings,
                 table_repair_records,
+                table_header_repair_records,
             ),
             encoding="utf-8",
         )
@@ -478,6 +486,17 @@ def _export_document(
 
     def export_chunks() -> tuple[list[dict[str, Any]], dict[str, Any]]:
         chunks, chunking_config = build_chunks(document)
+        picture_supplements = build_picture_supplement_chunks(picture_text_records)
+        base_chunk_count = len(chunks)
+        chunks.extend(picture_supplements)
+        for index, chunk in enumerate(chunks):
+            chunk["index"] = index
+        chunking_config.update(
+            {
+                "base_document_chunks": base_chunk_count,
+                "picture_supplement_chunks": len(picture_supplements),
+            }
+        )
         write_chunks_jsonl(run_dir / "chunks.jsonl", chunks)
         return chunks, chunking_config
 
@@ -498,6 +517,7 @@ def _export_document(
         "tables": table_count,
         "exported_table_images": exported_table_images,
         "repaired_tables": len(table_repair_records),
+        "table_header_fragments_repaired": len(table_header_repair_records),
         "repaired_table_evidence": repaired_evidence_count,
         "pictures": picture_count,
         "picture_structured_items": sum(

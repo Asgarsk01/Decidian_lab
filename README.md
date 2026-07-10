@@ -223,9 +223,12 @@ repaired_table_evidence/
 - `document.md` is the cleaned Markdown intended for review and future LLM
   extraction. PDF cleanup normalizes numbered and unnumbered heading depth,
   removes repeated page furniture using page provenance, conservatively repairs
-  explicit continued-table rows, and restores structured text found inside
-  picture regions.
-- `chunks.jsonl` contains HybridChunker output and source provenance.
+  explicit continued-table rows and one-letter wrapped table headers, protects
+  source-code comments from becoming headings, and restores structured text
+  found inside picture regions.
+- `chunks.jsonl` contains HybridChunker document chunks plus provenance-labelled
+  picture-text supplement chunks. Supplement chunks preserve the source page,
+  picture file, and medium/low trust label for diagram-derived text.
 - `picture_text.jsonl` records the best available text for exported PDF picture
   regions. Records with `source: docling_structured` preserve Docling child-item
   text and provenance and are labelled medium trust in Markdown. Tesseract runs

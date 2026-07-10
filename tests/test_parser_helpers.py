@@ -155,6 +155,24 @@ def test_pdf_heading_cleanup_uses_numbering_provenance_and_ignores_code() -> Non
     assert "# shell comment must stay code" in cleaned
 
 
+def test_pdf_code_item_starting_with_hash_is_not_promoted_to_heading() -> None:
+    markdown = "# Terraform - GKE Autopilot configuration\n\n## 4. Infrastructure"
+    document_data = {
+        "texts": [
+            {
+                "label": "code",
+                "text": "# Terraform - GKE Autopilot configuration resource foo {}",
+            }
+        ]
+    }
+
+    cleaned = clean_markdown_for_llm(markdown, document_data)
+
+    assert "\n# Terraform - GKE Autopilot configuration" not in f"\n{cleaned}"
+    assert r"\# Terraform - GKE Autopilot configuration" in cleaned
+    assert "## 4. Infrastructure" in cleaned
+
+
 def test_clean_markdown_repairs_explicit_continued_table() -> None:
     markdown = """| Alert | Metric | Threshold | Severity |
 | --- | --- | --- | --- |
@@ -208,6 +226,22 @@ def test_clean_markdown_repairs_explicit_continued_table() -> None:
             "source": "native_table_continuation",
         }
     ]
+
+
+def test_clean_markdown_repairs_only_proven_one_letter_table_header_fragments() -> None:
+    markdown = """| Alert Name | Threshol d | Model A | Type 1 |
+| --- | --- | --- | --- |
+| RATE_LIMIT | > 10 | Default | Standard |
+"""
+    repairs: list[dict[str, str]] = []
+
+    cleaned = clean_markdown_for_llm(
+        markdown,
+        table_header_repair_records=repairs,
+    )
+
+    assert "| Alert Name | Threshold | Model A | Type 1 |" in cleaned
+    assert repairs == [{"original": "Threshol d", "normalized": "Threshold"}]
 
 
 def test_structured_picture_text_prevents_unnecessary_ocr(tmp_path) -> None:
@@ -302,6 +336,25 @@ def test_ocr_residue_is_not_emitted(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(postprocess.subprocess, "run", lambda *args, **kwargs: Completed())
 
     assert postprocess._ocr_picture(image, {}, "tesseract", []) is None
+
+
+def test_ocr_noise_lines_are_removed_without_dropping_short_ui_labels(monkeypatch, tmp_path) -> None:
+    from decidian_docling import postprocess
+
+    image = tmp_path / "image.png"
+    image.write_bytes(b"not-a-real-image")
+
+    class Completed:
+        returncode = 0
+        stdout = "Add Spectator\nan\noo\nAI\n"
+        stderr = ""
+
+    monkeypatch.setattr(postprocess.subprocess, "run", lambda *args, **kwargs: Completed())
+
+    record = postprocess._ocr_picture(image, {}, "tesseract", [])
+
+    assert record is not None
+    assert record["text"] == "Add Spectator\nAI"
 
 
 def test_model_dump_preserves_json_lists_and_page_asset_cleanup(tmp_path) -> None:

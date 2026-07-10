@@ -7,8 +7,10 @@ no artifact-mode selector in the browser UI, no `--artifact-mode` CLI option,
 and no full audit package code path.
 
 Parsing quality is unchanged. OCR, accurate table extraction, heading cleanup,
-picture-text enrichment, and chunking run exactly as before. Only non-essential
-exports have been removed.
+picture-text enrichment, and chunking run locally. Non-essential exports are
+removed while derived extraction cleanup protects code comments from becoming
+headings, repairs narrow wrapped table headers, and adds provenance-labelled
+picture-text chunks.
 
 ## Output Created for Every Run
 
@@ -32,9 +34,11 @@ output/<safe-name>__<hash8>__<timestamp>/
 ```
 
 `document.md` is the future decision-extraction feed. It contains cleaned
-structure, repaired tables, and merged picture text. `document.json` remains
-the structured ground truth and `picture_text.jsonl` records the source and
-trust level of diagram-derived text.
+structure, repaired tables, protected source-code literals, and merged picture
+text. `document.json` remains the structured ground truth and
+`picture_text.jsonl` records the source and trust level of diagram-derived text.
+`chunks.jsonl` includes both normal document chunks and picture-text supplement
+chunks, which retain page, picture, provenance, and trust metadata.
 
 ## Files Deliberately Not Created
 

@@ -121,8 +121,14 @@ def _render_result(result: RunResult) -> None:
             st.caption(f"{len(lines)} chunks")
             for index, line in enumerate(lines):
                 data = json.loads(line)
+                origin = data.get("origin")
+                label = (
+                    f"Picture text — {data.get('trust', 'low')} trust"
+                    if origin == "picture_text"
+                    else f"Chunk {index + 1}"
+                )
                 with st.expander(
-                    f"Chunk {index + 1} — {data.get('token_count', 0)} tokens"
+                    f"{label} — {data.get('token_count', 0)} tokens"
                 ):
                     st.write(data.get("contextualized_text", ""))
                     st.json(
@@ -130,6 +136,9 @@ def _render_result(result: RunResult) -> None:
                             "headings": data.get("headings"),
                             "page_numbers": data.get("page_numbers"),
                             "source_refs": data.get("source_refs"),
+                            "origin": origin or "document",
+                            "trust": data.get("trust"),
+                            "picture_file": data.get("picture_file"),
                         },
                         expanded=False,
                     )

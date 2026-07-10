@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from decidian_docling.chunking import (
+    build_picture_supplement_chunks,
     enforce_chunk_limit,
     serialize_chunk,
     write_chunks_jsonl,
@@ -93,3 +94,40 @@ def test_enforce_chunk_limit_splits_without_losing_text() -> None:
     assert all(segment["token_count"] <= 10 for segment in segments)
     assert " ".join(segment["text"] for segment in segments).split() == words
     assert all(segment["source_refs"] == payload["source_refs"] for segment in segments)
+
+
+def test_picture_supplement_chunks_preserve_text_trust_and_provenance() -> None:
+    records = [
+        {
+            "picture_file": "picture-0003.png",
+            "asset_uri": "assets/diagram.png",
+            "page_number": 7,
+            "source": "docling_structured",
+            "trust": "medium",
+            "text": "Promote the replica after health checks pass.",
+            "items": [
+                {
+                    "self_ref": "#/texts/9",
+                    "label": "section_header",
+                    "text": "4.2 Recovery Sequence",
+                    "provenance": [{"page_no": 7}],
+                },
+                {
+                    "self_ref": "#/texts/10",
+                    "label": "text",
+                    "text": "Promote the replica after health checks pass.",
+                    "provenance": [{"page_no": 7}],
+                },
+            ],
+        }
+    ]
+
+    chunks = build_picture_supplement_chunks(records, tokenizer=FakeTokenizer())
+
+    assert len(chunks) == 1
+    assert chunks[0]["origin"] == "picture_text"
+    assert chunks[0]["trust"] == "medium"
+    assert chunks[0]["headings"] == ["4.2 Recovery Sequence"]
+    assert chunks[0]["page_numbers"] == [7]
+    assert chunks[0]["source_refs"][0]["self_ref"] == "#/texts/9"
+    assert "Picture text (page 7, picture-0003.png)" in chunks[0]["contextualized_text"]
