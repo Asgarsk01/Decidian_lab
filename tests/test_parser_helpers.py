@@ -38,6 +38,10 @@ def test_clean_markdown_demotes_false_headings_and_infers_numbered_levels() -> N
         [
             "#### 8-Nov-2025",
             "#### Automatically transitions workflow to Step 8 -Credit Note from DMS .",
+            "#### Width",
+            "#### Depth",
+            "#### Width:",
+            "#### · Date",
             "### 7.17.2 Width",
             "### 7.17.3 Depth",
             "## 10 Infra requirements & System Hygiene",
@@ -51,6 +55,12 @@ def test_clean_markdown_demotes_false_headings_and_infers_numbered_levels() -> N
     assert "\n8-Nov-2025\n" in f"\n{cleaned}\n"
     assert "#### Automatically transitions workflow" not in cleaned
     assert "Automatically transitions workflow to Step 8 - Credit Note from DMS." in cleaned
+    assert "#### Width" in cleaned
+    assert "#### Depth" in cleaned
+    assert "#### Width:" not in cleaned
+    assert "\nWidth:\n" in f"\n{cleaned}\n"
+    assert "#### · Date" not in cleaned
+    assert "\nDate\n" in f"\n{cleaned}\n"
     assert "#### 7.17.2 Width" in cleaned
     assert "#### 7.17.3 Depth" in cleaned
     assert "## 10 Infra requirements & System Hygiene" in cleaned
@@ -98,5 +108,6 @@ def test_inject_picture_ocr_adds_text_after_matching_image() -> None:
 
     injected = inject_picture_ocr(markdown, records)
 
-    assert "Image OCR, page 7, picture-0003.png" in injected
+    assert "LOW-TRUST IMAGE OCR - page 7, picture-0003.png" in injected
+    assert "not as authoritative requirements text" in injected
     assert "> Claim ID\n> Approve Step" in injected

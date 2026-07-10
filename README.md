@@ -202,12 +202,13 @@ tables/
 - `document.json` is the lossless Docling representation.
 - `document.raw.md` is Docling Markdown with only basic entity cleanup.
 - `document.md` is the cleaned Markdown intended for review and future LLM
-  extraction; PDF runs may include repaired borderless tables and image OCR
-  notes.
+  extraction; PDF runs may include repaired borderless tables and explicitly
+  low-trust image OCR notes.
 - `document.html` references exported local assets.
 - `document_preview.html` embeds images for convenient UI inspection.
 - `chunks.jsonl` contains HybridChunker output and source provenance.
 - `picture_text.jsonl` is best-effort OCR text for large exported PDF images.
+  Treat this as supporting visual context, not authoritative requirements text.
 - `evaluation.json` begins as `pending` and is updated when UI scores are saved.
 - `result.zip` contains the complete run.
 

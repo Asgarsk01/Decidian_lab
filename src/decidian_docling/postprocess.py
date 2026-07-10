@@ -207,8 +207,7 @@ def _clean_heading_line(line: str) -> str:
     if numbered is not None:
         return numbered
 
-    normalized_label = text.lstrip("·•- ").rstrip(":").strip().lower()
-    if normalized_label in FALSE_HEADING_LABELS:
+    if _is_false_label_heading(text):
         return text.lstrip("·•- ").strip()
 
     if _is_false_sentence_heading(text):
@@ -239,6 +238,18 @@ def _is_false_sentence_heading(text: str) -> bool:
     if stripped.endswith(".") and len(stripped.split()) >= 5:
         return True
     return False
+
+
+def _is_false_label_heading(text: str) -> bool:
+    stripped = text.strip()
+    label_text = stripped.lstrip("·•- ").strip()
+    has_marker = label_text != stripped
+    has_colon = label_text.endswith(":")
+    if not has_marker and not has_colon:
+        return False
+
+    normalized_label = label_text.rstrip(":").strip().lower()
+    return normalized_label in FALSE_HEADING_LABELS
 
 
 def _looks_like_date(text: str) -> bool:
@@ -363,14 +374,22 @@ def _escape_table_cell(value: str) -> str:
 def _format_ocr_block(record: dict[str, Any]) -> list[str]:
     page = record.get("page_number")
     picture = record.get("picture_file")
-    label = f"Image OCR"
+    location: list[str] = []
     if page is not None:
-        label += f", page {page}"
+        location.append(f"page {page}")
     if picture:
-        label += f", {picture}"
+        location.append(str(picture))
+    label = "LOW-TRUST IMAGE OCR"
+    if location:
+        label += f" - {', '.join(location)}"
     text = str(record.get("text", "")).strip()
     quoted = [f"> {line}" if line else ">" for line in text.splitlines()]
-    return ["", f"> {label}:", *quoted]
+    return [
+        "",
+        f"> {label}:",
+        "> This text was OCR-extracted from an image and may contain recognition errors. Use it only as supporting visual context, not as authoritative requirements text.",
+        *quoted,
+    ]
 
 
 def _load_picture_metadata(document_json_path: Path) -> list[dict[str, Any]]:
