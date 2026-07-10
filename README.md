@@ -202,13 +202,18 @@ tables/
 - `document.json` is the lossless Docling representation.
 - `document.raw.md` is Docling Markdown with only basic entity cleanup.
 - `document.md` is the cleaned Markdown intended for review and future LLM
-  extraction; PDF runs may include repaired borderless tables and explicitly
-  low-trust image OCR notes.
+  extraction. PDF cleanup normalizes numbered and unnumbered heading depth,
+  removes repeated page furniture using page provenance, conservatively repairs
+  explicit continued-table rows, and restores structured text found inside
+  picture regions.
 - `document.html` references exported local assets.
 - `document_preview.html` embeds images for convenient UI inspection.
 - `chunks.jsonl` contains HybridChunker output and source provenance.
-- `picture_text.jsonl` is best-effort OCR text for large exported PDF images.
-  Treat this as supporting visual context, not authoritative requirements text.
+- `picture_text.jsonl` records the best available text for exported PDF picture
+  regions. Records with `source: docling_structured` preserve Docling child-item
+  text and provenance and are labelled medium trust in Markdown. Tesseract runs
+  only as a fallback and produces `source: tesseract_ocr`, labelled low trust.
+  Both remain supporting visual context rather than authoritative requirements.
 - `evaluation.json` begins as `pending` and is updated when UI scores are saved.
 - `result.zip` contains the complete run.
 

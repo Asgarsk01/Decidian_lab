@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import json
 import os
 import platform
 import time
@@ -26,8 +27,8 @@ from .models import (
 )
 from .postprocess import (
     clean_markdown_for_llm,
-    extract_picture_ocr,
-    inject_picture_ocr,
+    extract_picture_text,
+    inject_picture_text,
     normalize_markdown_export,
 )
 from .profiles import build_pdf_pipeline_options, get_profile
@@ -207,6 +208,9 @@ def _export_document(
         artifacts_dir=assets_dir,
         image_mode=ImageRefMode.REFERENCED,
     )
+    document_data = json.loads(
+        (run_dir / "document.json").read_text(encoding="utf-8")
+    )
     raw_markdown_path = run_dir / "document.raw.md"
     markdown_path = run_dir / "document.md"
     document.save_as_markdown(
@@ -218,7 +222,14 @@ def _export_document(
         raw_markdown_path.read_text(encoding="utf-8")
     )
     raw_markdown_path.write_text(raw_markdown, encoding="utf-8")
-    markdown_path.write_text(clean_markdown_for_llm(raw_markdown), encoding="utf-8")
+    markdown_path.write_text(
+        clean_markdown_for_llm(
+            raw_markdown,
+            document_data if source_extension == ".pdf" else None,
+            warnings,
+        ),
+        encoding="utf-8",
+    )
     document.save_as_html(
         run_dir / "document.html",
         artifacts_dir=assets_dir,
@@ -240,18 +251,18 @@ def _export_document(
         run_dir / "tables",
         warnings,
     )
-    picture_ocr_records = []
+    picture_text_records: list[dict[str, Any]] = []
     if source_extension == ".pdf" and picture_count:
-        picture_ocr_records = extract_picture_ocr(
+        picture_text_records = extract_picture_text(
             run_dir / "pictures",
             run_dir / "document.json",
             run_dir / "picture_text.jsonl",
             warnings,
         )
         markdown_path.write_text(
-            inject_picture_ocr(
+            inject_picture_text(
                 markdown_path.read_text(encoding="utf-8"),
-                picture_ocr_records,
+                picture_text_records,
             ),
             encoding="utf-8",
         )
@@ -264,7 +275,14 @@ def _export_document(
         "elements": element_count,
         "tables": table_count,
         "pictures": picture_count,
-        "picture_ocr_items": len(picture_ocr_records),
+        "picture_structured_items": sum(
+            record.get("source") == "docling_structured"
+            for record in picture_text_records
+        ),
+        "picture_ocr_items": sum(
+            record.get("source") == "tesseract_ocr"
+            for record in picture_text_records
+        ),
         "chunks": len(chunks),
     }
     return counts, chunking_config

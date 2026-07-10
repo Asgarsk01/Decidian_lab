@@ -4,7 +4,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from decidian_docling.chunking import serialize_chunk, write_chunks_jsonl
+from decidian_docling.chunking import (
+    enforce_chunk_limit,
+    serialize_chunk,
+    write_chunks_jsonl,
+)
 
 
 @dataclass
@@ -69,3 +73,23 @@ def test_chunk_serialization_and_jsonl(tmp_path: Path) -> None:
     stored = json.loads(output.read_text(encoding="utf-8"))
     assert stored["contextualized_text"].startswith("Retry policy")
 
+
+def test_enforce_chunk_limit_splits_without_losing_text() -> None:
+    words = [f"word-{index}" for index in range(18)]
+    payload = {
+        "index": 0,
+        "text": " ".join(words),
+        "contextualized_text": "Architecture\n" + " ".join(words),
+        "headings": ["Architecture"],
+        "captions": [],
+        "page_numbers": [9],
+        "source_refs": [{"self_ref": "#/tables/1"}],
+        "token_count": 19,
+    }
+
+    segments = enforce_chunk_limit(payload, FakeTokenizer(), max_tokens=10)
+
+    assert len(segments) > 1
+    assert all(segment["token_count"] <= 10 for segment in segments)
+    assert " ".join(segment["text"] for segment in segments).split() == words
+    assert all(segment["source_refs"] == payload["source_refs"] for segment in segments)

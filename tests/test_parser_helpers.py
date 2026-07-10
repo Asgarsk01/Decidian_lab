@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+
 from decidian_docling.postprocess import (
     clean_markdown_for_llm,
+    extract_picture_text,
     inject_picture_ocr,
+    inject_picture_text,
     normalize_markdown_export,
 )
 
@@ -111,3 +115,151 @@ def test_inject_picture_ocr_adds_text_after_matching_image() -> None:
     assert "LOW-TRUST IMAGE OCR - page 7, picture-0003.png" in injected
     assert "not as authoritative requirements text" in injected
     assert "> Claim ID\n> Approve Step" in injected
+
+
+def test_pdf_heading_cleanup_uses_numbering_provenance_and_ignores_code() -> None:
+    markdown = """### 2. Architecture
+#### 2.1 Scope
+###### Supporting Analysis
+###### ACME Platform | CONFIDENTIAL
+```
+# shell comment must stay code
+```
+"""
+    document_data = {
+        "pages": {"1": {"size": {"height": 800}}},
+        "texts": [
+            {"label": "page_header", "text": "ACME Platform | CONFIDENTIAL"},
+            {
+                "label": "section_header",
+                "text": "Supporting Analysis",
+                "level": 5,
+                "prov": [{"page_no": 1, "bbox": {"t": 500, "b": 480}}],
+            },
+            {
+                "label": "section_header",
+                "text": "ACME Platform | CONFIDENTIAL",
+                "level": 6,
+                "prov": [{"page_no": 1, "bbox": {"t": 775, "b": 760}}],
+            },
+        ],
+    }
+
+    cleaned = clean_markdown_for_llm(markdown, document_data)
+
+    assert "## 2. Architecture" in cleaned
+    assert "### 2.1 Scope" in cleaned
+    assert "##### Supporting Analysis" in cleaned
+    assert "ACME Platform | CONFIDENTIAL" not in cleaned
+    assert "# shell comment must stay code" in cleaned
+
+
+def test_clean_markdown_repairs_explicit_continued_table() -> None:
+    markdown = """| Alert | Metric | Threshold | Severity |
+| --- | --- | --- | --- |
+| AI_CONFIDENCE_ | RAG query | < 0.70 over | WARNIN |
+
+| Alert | Metric | Threshold | Severity |
+| --- | --- | --- | --- |
+| LOW | confidence score avg | 30min | G |
+| API_ERROR | API failures | > 5% | CRITICAL |
+"""
+    table_a = {
+        "prov": [{"page_no": 10, "bbox": {"t": 300, "b": 50}}]
+    }
+    table_b = {
+        "prov": [{"page_no": 11, "bbox": {"t": 760, "b": 500}}]
+    }
+    document_data = {
+        "pages": {
+            "10": {"size": {"height": 800}},
+            "11": {"size": {"height": 800}},
+        },
+        "texts": [],
+        "tables": [table_a, table_b],
+    }
+    warnings: list[str] = []
+
+    cleaned = clean_markdown_for_llm(markdown, document_data, warnings)
+
+    assert "| AI_CONFIDENCE_LOW | RAG query confidence score avg | < 0.70 over 30min | WARNING |" in cleaned
+    assert cleaned.count("| Alert | Metric | Threshold | Severity |") == 1
+    assert any("Repaired a continued table" in warning for warning in warnings)
+
+
+def test_structured_picture_text_prevents_unnecessary_ocr(tmp_path) -> None:
+    pictures = tmp_path / "pictures"
+    pictures.mkdir()
+    (pictures / "picture-0001.png").write_bytes(b"not-read-for-structured-text")
+    document_json = tmp_path / "document.json"
+    document_json.write_text(
+        json.dumps(
+            {
+                "pages": {"4": {"size": {"height": 800}}},
+                "texts": [
+                    {
+                        "self_ref": "#/texts/1",
+                        "label": "section_header",
+                        "text": "4.2 Recovery Sequence",
+                        "level": 3,
+                        "prov": [{"page_no": 4, "bbox": {"t": 700, "b": 680}}],
+                    },
+                    {
+                        "self_ref": "#/texts/2",
+                        "label": "text",
+                        "text": "Promote the replica only after health checks pass.",
+                        "prov": [{"page_no": 4, "bbox": {"t": 650, "b": 620}}],
+                    },
+                ],
+                "pictures": [
+                    {
+                        "children": [
+                            {"$ref": "#/texts/1"},
+                            {"$ref": "#/texts/2"},
+                        ],
+                        "prov": [{"page_no": 4}],
+                        "image": {
+                            "uri": "assets/diagram.png",
+                            "size": {"width": 900, "height": 600},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    warnings: list[str] = []
+
+    records = extract_picture_text(
+        pictures,
+        document_json,
+        tmp_path / "picture_text.jsonl",
+        warnings,
+    )
+    injected = inject_picture_text(
+        "![Diagram](assets/diagram.png)\n",
+        records,
+    )
+
+    assert records[0]["source"] == "docling_structured"
+    assert "### 4.2 Recovery Sequence" in injected
+    assert "MEDIUM-TRUST DOCLING PICTURE TEXT" in injected
+    assert "Promote the replica only after health checks pass." in injected
+    assert not warnings
+
+
+def test_picture_text_enrichment_is_non_fatal(tmp_path) -> None:
+    document_json = tmp_path / "document.json"
+    document_json.write_text("not-json", encoding="utf-8")
+    warnings: list[str] = []
+
+    records = extract_picture_text(
+        tmp_path,
+        document_json,
+        tmp_path / "picture_text.jsonl",
+        warnings,
+    )
+
+    assert records == []
+    assert (tmp_path / "picture_text.jsonl").read_text(encoding="utf-8") == ""
+    assert any("unexpected error" in warning for warning in warnings)
