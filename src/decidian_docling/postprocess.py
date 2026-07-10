@@ -23,6 +23,8 @@ FALSE_HEADING_LABELS = {
     "date",
 }
 
+MAX_HEADING_LEVEL = 4
+
 TABLE_HEADER_PAIRS = {
     ("Category", "Requirement"): {
         "Performance",
@@ -199,15 +201,59 @@ def _clean_heading_line(line: str) -> str:
 
     parts = re.split(r"\s+(?=\d+(?:\.\d+){1,}\s+[A-Z])", text)
     if len(parts) > 1 and re.match(r"^\d+(?:\.\d+){1,}\s+", parts[0]):
-        level = min(len(hashes), 4)
-        return "\n".join(f"{'#' * level} {part.strip()}" for part in parts)
+        return "\n".join(_format_numbered_heading(part.strip()) for part in parts)
+
+    numbered = _format_numbered_heading(text)
+    if numbered is not None:
+        return numbered
 
     normalized_label = text.lstrip("·•- ").rstrip(":").strip().lower()
     if normalized_label in FALSE_HEADING_LABELS:
         return text.lstrip("·•- ").strip()
 
-    level = min(len(hashes), 4)
+    if _is_false_sentence_heading(text):
+        return _normalize_sentence_text(text)
+
+    level = min(len(hashes), MAX_HEADING_LEVEL)
     return f"{'#' * level} {text}"
+
+
+def _format_numbered_heading(text: str) -> str | None:
+    match = re.match(r"^(\d+(?:\.\d+)*)\s+(.+)$", text)
+    if not match:
+        return None
+
+    number, title = match.groups()
+    if _looks_like_date(text):
+        return None
+
+    depth = number.count(".") + 1
+    level = min(depth + 1, MAX_HEADING_LEVEL)
+    return f"{'#' * level} {number} {title.strip()}"
+
+
+def _is_false_sentence_heading(text: str) -> bool:
+    stripped = text.strip()
+    if _looks_like_date(stripped):
+        return True
+    if stripped.endswith(".") and len(stripped.split()) >= 5:
+        return True
+    return False
+
+
+def _looks_like_date(text: str) -> bool:
+    return bool(
+        re.match(r"^\d{1,2}[-/][A-Za-z]{3,9}[-/]\d{2,4}$", text)
+        or re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$", text)
+    )
+
+
+def _normalize_sentence_text(text: str) -> str:
+    text = re.sub(r"\s+([.,;:])", r"\1", text.strip())
+    if _looks_like_date(text):
+        return text
+    text = re.sub(r"\s*-\s*", " - ", text)
+    return text
 
 
 def _repair_borderless_tables(markdown: str) -> str:

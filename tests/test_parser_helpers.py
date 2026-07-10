@@ -33,6 +33,30 @@ def test_clean_markdown_splits_fused_headings_and_demotes_field_labels() -> None
     assert r"\# of Virtual Machines (VMs)" in cleaned
 
 
+def test_clean_markdown_demotes_false_headings_and_infers_numbered_levels() -> None:
+    markdown = "\n".join(
+        [
+            "#### 8-Nov-2025",
+            "#### Automatically transitions workflow to Step 8 -Credit Note from DMS .",
+            "### 7.17.2 Width",
+            "### 7.17.3 Depth",
+            "## 10 Infra requirements & System Hygiene",
+            "#### Backup and Recovery",
+        ]
+    )
+
+    cleaned = clean_markdown_for_llm(markdown)
+
+    assert "#### 8-Nov-2025" not in cleaned
+    assert "\n8-Nov-2025\n" in f"\n{cleaned}\n"
+    assert "#### Automatically transitions workflow" not in cleaned
+    assert "Automatically transitions workflow to Step 8 - Credit Note from DMS." in cleaned
+    assert "#### 7.17.2 Width" in cleaned
+    assert "#### 7.17.3 Depth" in cleaned
+    assert "## 10 Infra requirements & System Hygiene" in cleaned
+    assert "#### Backup and Recovery" in cleaned
+
+
 def test_clean_markdown_repairs_borderless_two_column_tables() -> None:
     markdown = """## 8 Non-Functional Requirements
 
