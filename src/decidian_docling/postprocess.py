@@ -57,6 +57,22 @@ MIN_OCR_DIMENSION = 50
 PICTURE_OCR_TIMEOUT_SECONDS = 20
 MAX_OCR_PICTURES = 40
 
+# Residue repeatedly observed in diagram OCR. These are not meaningful labels
+# on their own; a line that also contains substantive words is retained.
+OCR_RESIDUE_WORDS = {
+    "aay",
+    "aoe",
+    "aee",
+    "caan",
+    "cea",
+    "eee",
+    "gee",
+    "geel",
+    "gere",
+    "ieee",
+    "saag",
+}
+
 
 @dataclass(frozen=True)
 class HeadingContext:
@@ -156,6 +172,48 @@ def inject_picture_text(markdown: str, records: list[dict[str, Any]]) -> str:
     return "\n".join(output).rstrip() + "\n"
 
 
+def inject_picture_integrity_warnings(
+    markdown: str,
+    coverage: list[dict[str, Any]],
+) -> str:
+    """Place an explicit warning beside every qualifying uncovered picture."""
+    unresolved = [
+        item
+        for item in coverage
+        if item.get("qualifying")
+        and item.get("coverage_status") not in {"structured_text", "ocr_text"}
+    ]
+    if not unresolved:
+        return markdown
+
+    warning = (
+        "SEMANTIC INTEGRITY WARNING: This image has no verified text coverage. "
+        "Do not infer requirements, decisions, labels, or relationships from it "
+        "without reviewing the source image."
+    )
+    by_uri = {
+        str(item["asset_uri"]): item
+        for item in unresolved
+        if item.get("asset_uri")
+    }
+    emitted: set[str] = set()
+    output: list[str] = []
+    for line in markdown.splitlines():
+        output.append(line)
+        for asset_uri in by_uri:
+            if f"]({asset_uri})" in line and asset_uri not in emitted:
+                output.extend(["", f"> {warning}"])
+                emitted.add(asset_uri)
+
+    missing = [item for item in unresolved if item.get("asset_uri") not in emitted]
+    if missing:
+        output.extend(["", "## Unresolved Image Content"])
+        for item in missing:
+            identifier = item.get("picture_file") or item.get("source_ref") or "picture"
+            output.extend(["", f"### {identifier}", f"> {warning}"])
+    return "\n".join(output).rstrip() + "\n"
+
+
 def inject_picture_ocr(markdown: str, records: list[dict[str, Any]]) -> str:
     """Backward-compatible wrapper for older callers and tests."""
     return inject_picture_text(markdown, records)
@@ -168,6 +226,22 @@ def extract_picture_text(
     warnings: list[str],
 ) -> list[dict[str, Any]]:
     """Best-effort structured-first picture extraction; never raises."""
+    records, _coverage = extract_picture_text_with_coverage(
+        pictures_dir,
+        document_json_path,
+        output_path,
+        warnings,
+    )
+    return records
+
+
+def extract_picture_text_with_coverage(
+    pictures_dir: Path,
+    document_json_path: Path,
+    output_path: Path,
+    warnings: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Extract picture text and return an auditable outcome for every picture."""
     try:
         return _extract_picture_text_impl(
             pictures_dir,
@@ -178,7 +252,7 @@ def extract_picture_text(
     except Exception as exc:
         warnings.append(f"Picture text extraction skipped after unexpected error: {exc}")
         _write_jsonl(output_path, [])
-        return []
+        return [], []
 
 
 def _extract_picture_text_impl(
@@ -186,27 +260,49 @@ def _extract_picture_text_impl(
     document_json_path: Path,
     output_path: Path,
     warnings: list[str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Prefer Docling picture-child text and OCR only pictures lacking it."""
     records: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
     data = json.loads(document_json_path.read_text(encoding="utf-8"))
     pictures = data.get("pictures", [])
     texts_by_ref = {
         str(item.get("self_ref")): item for item in data.get("texts", [])
     }
     heading_context = _build_heading_context(data)
-    ocr_candidates: list[tuple[Path, dict[str, Any]]] = []
+    ocr_candidates: list[
+        tuple[Path, dict[str, Any], dict[str, Any], list[dict[str, Any]]]
+    ] = []
+    image_paths = sorted(pictures_dir.glob("picture-*.png"))
 
-    for index, image_path in enumerate(sorted(pictures_dir.glob("picture-*.png"))):
-        meta = pictures[index] if index < len(pictures) else {}
+    for index, meta in enumerate(pictures):
+        image_path = image_paths[index] if index < len(image_paths) else None
+        width, height = _picture_size(meta)
+        outcome = {
+            "picture_file": image_path.name if image_path is not None else None,
+            "asset_uri": _asset_uri(meta),
+            "source_ref": str(meta.get("self_ref") or f"#/pictures/{index}"),
+            "page_number": _page_number(meta),
+            "width": width,
+            "height": height,
+            "qualifying": _should_ocr_picture(width, height),
+            "coverage_status": "below_threshold",
+        }
         items = _picture_child_items(
             meta,
             texts_by_ref,
             heading_context,
             _picture_heading_ceiling(meta, data, texts_by_ref, heading_context),
         )
+        context_items = _picture_context_items(
+            meta,
+            data,
+            texts_by_ref,
+            heading_context,
+        )
         if _has_useful_structured_picture_text(items):
-            width, height = _picture_size(meta)
+            outcome["coverage_status"] = "structured_text"
+            coverage.append(outcome)
             records.append(
                 {
                     "index": len(records),
@@ -217,42 +313,84 @@ def _extract_picture_text_impl(
                     "height": height,
                     "source": "docling_structured",
                     "trust": "medium",
+                    "source_ref": outcome["source_ref"],
                     "items": items,
+                    "context_items": context_items,
                     "text": "\n".join(item["text"] for item in items),
                 }
             )
             continue
 
-        width, height = _picture_size(meta)
-        if _should_ocr_picture(width, height):
-            ocr_candidates.append((image_path, meta))
+        if not outcome["qualifying"]:
+            coverage.append(outcome)
+            continue
+        if image_path is None:
+            outcome["coverage_status"] = "missing_exported_asset"
+            coverage.append(outcome)
+            continue
+        outcome["coverage_status"] = "ocr_pending"
+        coverage.append(outcome)
+        ocr_candidates.append((image_path, meta, outcome, context_items))
+
+    for index, image_path in enumerate(image_paths[len(pictures) :], start=len(pictures)):
+        coverage.append(
+            {
+                "picture_file": image_path.name,
+                "asset_uri": None,
+                "source_ref": f"#/pictures/unmatched/{index}",
+                "page_number": None,
+                "width": None,
+                "height": None,
+                "qualifying": True,
+                "coverage_status": "unmatched_source_reference",
+            }
+        )
 
     if len(ocr_candidates) > MAX_OCR_PICTURES:
         warnings.append(
             "Picture OCR limited to "
             f"{MAX_OCR_PICTURES} of {len(ocr_candidates)} fallback images"
         )
+        for _image_path, _meta, outcome, _context_items in ocr_candidates[MAX_OCR_PICTURES:]:
+            outcome["coverage_status"] = "ocr_limit_exceeded"
         ocr_candidates = ocr_candidates[:MAX_OCR_PICTURES]
 
     if ocr_candidates:
         tesseract = shutil.which("tesseract")
         if tesseract is None:
             warnings.append("Picture OCR fallback skipped: tesseract executable not found")
+            for _image_path, _meta, outcome, _context_items in ocr_candidates:
+                outcome["coverage_status"] = "ocr_unavailable"
         else:
-            for image_path, meta in ocr_candidates:
+            for image_path, meta, outcome, context_items in ocr_candidates:
+                warning_count = len(warnings)
                 record = _ocr_picture(image_path, meta, tesseract, warnings)
                 if record is not None:
+                    outcome["coverage_status"] = "ocr_text"
                     record.update(
                         {
                             "index": len(records),
                             "source": "tesseract_ocr",
                             "trust": "low",
+                            "source_ref": outcome["source_ref"],
+                            "context_items": context_items,
                         }
                     )
                     records.append(record)
+                else:
+                    recent_warnings = warnings[warning_count:]
+                    outcome["coverage_status"] = (
+                        "ocr_timeout"
+                        if any("timed out" in warning for warning in recent_warnings)
+                        else "ocr_failed"
+                        if any("Picture OCR failed" in warning for warning in recent_warnings)
+                        else "ocr_low_quality"
+                        if any("low-quality text" in warning for warning in recent_warnings)
+                        else "ocr_empty"
+                    )
 
     _write_jsonl(output_path, records)
-    return records
+    return records, coverage
 
 
 def _picture_child_items(
@@ -319,6 +457,47 @@ def _picture_heading_ceiling(
     return None
 
 
+def _picture_context_items(
+    picture: dict[str, Any],
+    document_data: dict[str, Any],
+    texts_by_ref: dict[str, dict[str, Any]],
+    heading_context: HeadingContext | None,
+) -> list[dict[str, Any]]:
+    """Return the nearest preceding section heading for picture OCR context."""
+    picture_ref = str(picture.get("self_ref", ""))
+    body_children = (document_data.get("body") or {}).get("children", []) or []
+    picture_index = next(
+        (
+            index
+            for index, child in enumerate(body_children)
+            if str(child.get("$ref", "")) == picture_ref
+        ),
+        None,
+    )
+    if picture_index is None:
+        return []
+    for child in reversed(body_children[:picture_index]):
+        item = texts_by_ref.get(str(child.get("$ref", "")))
+        if not item or item.get("label") != "section_header":
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text or (
+            heading_context and _text_signature(text) in heading_context.furniture
+        ):
+            continue
+        level = item.get("level")
+        return [
+            {
+                "self_ref": str(item.get("self_ref", "")),
+                "label": "section_header",
+                "level": int(level) if isinstance(level, (int, float)) else None,
+                "text": text,
+                "provenance": item.get("prov", []),
+            }
+        ]
+    return []
+
+
 def _has_useful_structured_picture_text(items: list[dict[str, Any]]) -> bool:
     if not items:
         return False
@@ -353,7 +532,12 @@ def _ocr_picture(
         warnings.append(f"Picture OCR failed for {image_path.name}: {detail}")
         return None
     text = _clean_ocr_text(completed.stdout)
+    if not text:
+        return None
     if not _has_useful_ocr_text(text):
+        warnings.append(
+            f"Picture OCR rejected for {image_path.name}: low-quality text"
+        )
         return None
     width, height = _picture_size(meta)
     return {
@@ -452,6 +636,8 @@ def _clean_heading_line(
 
     hashes, text = match.groups()
     text = text.strip()
+    if not text:
+        return ""
 
     signature = _text_signature(text)
     if context is not None and signature in context.furniture:
@@ -1114,23 +1300,49 @@ def _clean_ocr_text(text: str) -> str:
 
 
 def _has_useful_ocr_text(text: str) -> bool:
-    """Reject obvious OCR residue without filtering short legitimate labels.
+    """Require enough distinct natural-language content to retain fallback OCR.
 
-    A single character (for example the isolated ``A`` from a decorative image)
-    adds no decision-extraction value and is low-trust noise. Two-character
-    identifiers such as ``DB`` and ``AI`` remain valid picture text.
+    Diagram OCR is supporting evidence, not authoritative text. A lone label,
+    symbol soup, or a repeated short token is more harmful than useful when it
+    is injected into review Markdown or sent to a visual-only downstream feed.
+    Uppercase abbreviations such as ``AI`` remain valid *within* a useful
+    multi-word result, but cannot make a result useful by themselves.
     """
-    return len(re.sub(r"\s+", "", text)) >= 2
+    compact = re.sub(r"\s+", "", text)
+    tokens = re.findall(r"[A-Za-z0-9]+", text)
+    substantial = [token.casefold() for token in tokens if len(token) >= 3]
+    meaningful = [token.casefold() for token in tokens if len(token) >= 5]
+    short = [token for token in tokens if len(token) < 3]
+    return (
+        len(compact) >= 12
+        and len(substantial) >= 2
+        and len(set(substantial)) >= 2
+        and bool(meaningful)
+        and len(short) <= len(substantial) * 1.5
+    )
 
 
 def _is_useful_ocr_line(line: str) -> bool:
-    """Keep meaningful UI labels while dropping isolated OCR residue."""
+    """Keep lines that can contribute to a multi-word OCR result."""
     compact = re.sub(r"\s+", "", line)
     if len(compact) < 2 or not re.search(r"[A-Za-z0-9]", compact):
         return False
+    tokens = re.findall(r"[A-Za-z0-9]+", line)
+    if not tokens:
+        return False
+    words = [token.casefold() for token in tokens if len(token) >= 3]
+    if words and all(word in OCR_RESIDUE_WORDS for word in words):
+        return False
     # Lowercase two-character fragments occur frequently around icons and
-    # borders. Uppercase abbreviations such as AI, IO, and QA remain valid.
-    return compact not in {"an", "oo"}
+    # borders. Uppercase abbreviations such as AI, IO, and QA remain valid
+    # alongside descriptive words, but short-token-only lines are discarded.
+    return (
+        compact.casefold() not in {"an", "oo"}
+        and (
+            any(len(token) >= 3 for token in tokens)
+            or bool(re.fullmatch(r"[A-Z0-9]{2,5}", compact))
+        )
+    )
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:

@@ -62,6 +62,14 @@ def _run_one(
         bold=True,
     )
     typer.echo(f"Artifacts: {result.run_dir}")
+    typer.echo(f"LLM readiness: {result.manifest.get('llm_readiness', 'ready')}")
+    integrity = result.manifest.get("semantic_integrity") or {}
+    if integrity.get("finding_count"):
+        typer.echo(
+            "Semantic integrity findings: "
+            f"{integrity.get('finding_count')} "
+            f"{integrity.get('summary', {})}"
+        )
     for warning in result.warnings:
         typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW)
     return result.status is not RunStatus.FAILED

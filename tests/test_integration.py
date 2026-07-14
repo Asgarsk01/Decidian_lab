@@ -47,6 +47,7 @@ def test_real_docling_exports(
         "document.md",
         "document.txt",
         "chunks.jsonl",
+        "picture_chunks.jsonl",
         "evaluation.json",
     ]:
         assert (result.run_dir / required).is_file(), required

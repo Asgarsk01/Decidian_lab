@@ -50,6 +50,18 @@ def _show_file_preview(path: Path, language: str = "text") -> None:
         )
 
 
+def _page_metric(manifest: dict) -> tuple[str | int, str | None]:
+    """Avoid presenting missing DOCX pagination as a zero-page document."""
+    source = manifest.get("source") or {}
+    counts = manifest.get("counts") or {}
+    if (
+        source.get("extension") == ".docx"
+        and not counts.get("pages")
+    ):
+        return "Unavailable", "DOCX page provenance is unavailable in this conversion."
+    return counts.get("pages", 0), None
+
+
 def _render_result(result: RunResult) -> None:
     run_dir = result.run_dir
     manifest = result.manifest
@@ -67,18 +79,32 @@ def _render_result(result: RunResult) -> None:
     )
 
     counts = manifest.get("counts", {})
-    metrics = st.columns(5)
+    metrics = st.columns(7)
+    page_value, page_help = _page_metric(manifest)
+    metrics[0].metric("Pages", page_value, help=page_help)
     for column, (label, key) in zip(
-        metrics,
+        metrics[1:],
         [
-            ("Pages", "pages"),
             ("Elements", "elements"),
             ("Tables", "tables"),
             ("Pictures", "pictures"),
-            ("Chunks", "chunks"),
+            ("Core chunks", "chunks"),
+            ("Visual chunks", "picture_chunks"),
+            ("Integrity", "semantic_integrity_findings"),
         ],
     ):
         column.metric(label, counts.get(key, 0))
+
+    readiness = manifest.get("llm_readiness", "ready")
+    if readiness == "review_required":
+        st.warning("LLM readiness: review required")
+    else:
+        st.success("LLM readiness: ready")
+    if manifest.get("visual_readiness") == "review_required":
+        st.info(
+            "Visual OCR readiness: review required. Core text/table chunks remain "
+            "available separately in chunks.jsonl."
+        )
 
     if result.warnings:
         with st.expander(f"Warnings ({len(result.warnings)})", expanded=True):
@@ -90,7 +116,8 @@ def _render_result(result: RunResult) -> None:
             "Summary",
             "Markdown",
             "JSON",
-            "Chunks",
+            "Core chunks",
+            "Visual OCR",
             "Tables",
             "Pictures",
             "Evaluation",
@@ -99,6 +126,10 @@ def _render_result(result: RunResult) -> None:
 
     with tabs[0]:
         st.json(manifest, expanded=2)
+        integrity_path = run_dir / "semantic_integrity.json"
+        if integrity_path.exists():
+            with st.expander("Semantic integrity", expanded=readiness == "review_required"):
+                st.json(read_json(integrity_path), expanded=2)
         st.caption(f"Run directory: {run_dir}")
 
     with tabs[1]:
@@ -136,6 +167,8 @@ def _render_result(result: RunResult) -> None:
                             "headings": data.get("headings"),
                             "page_numbers": data.get("page_numbers"),
                             "source_refs": data.get("source_refs"),
+                            "integrity_status": data.get("integrity_status"),
+                            "integrity_finding_ids": data.get("integrity_finding_ids"),
                             "origin": origin or "document",
                             "trust": data.get("trust"),
                             "picture_file": data.get("picture_file"),
@@ -143,9 +176,41 @@ def _render_result(result: RunResult) -> None:
                         expanded=False,
                     )
         else:
-            st.info("Chunks were not generated.")
+            st.info("Core chunks were not generated.")
 
     with tabs[4]:
+        visual_chunks_path = run_dir / "picture_chunks.jsonl"
+        if visual_chunks_path.exists():
+            lines = visual_chunks_path.read_text(encoding="utf-8").splitlines()
+            st.caption(f"{len(lines)} visual-only chunk(s); excluded from the core feed")
+            for index, line in enumerate(lines):
+                data = json.loads(line)
+                origin = data.get("origin", "picture_text")
+                label = (
+                    "Visual integrity warning"
+                    if origin == "semantic_integrity_warning"
+                    else f"Picture text — {data.get('trust', 'low')} trust"
+                )
+                with st.expander(
+                    f"{label} — {data.get('token_count', 0)} tokens"
+                ):
+                    st.write(data.get("contextualized_text", ""))
+                    st.json(
+                        {
+                            "page_numbers": data.get("page_numbers"),
+                            "provenance_scope": data.get("provenance_scope"),
+                            "source_refs": data.get("source_refs"),
+                            "integrity_status": data.get("integrity_status"),
+                            "integrity_finding_ids": data.get("integrity_finding_ids"),
+                            "trust": data.get("trust"),
+                            "picture_file": data.get("picture_file"),
+                        },
+                        expanded=False,
+                    )
+        else:
+            st.info("No visual OCR chunks were generated.")
+
+    with tabs[5]:
         table_dir = run_dir / "tables"
         _show_images(
             sorted(table_dir.glob("*.png")) if table_dir.exists() else [],
@@ -158,14 +223,14 @@ def _render_result(result: RunResult) -> None:
 
                 st.dataframe(pd.read_csv(path), use_container_width=True)
 
-    with tabs[5]:
+    with tabs[6]:
         picture_dir = run_dir / "pictures"
         _show_images(
             sorted(picture_dir.glob("*.png")) if picture_dir.exists() else [],
             "No pictures were detected.",
         )
 
-    with tabs[6]:
+    with tabs[7]:
         existing_path = run_dir / "evaluation.json"
         existing = read_json(existing_path) if existing_path.exists() else {}
         existing_scores = existing.get("scores", {})

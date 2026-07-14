@@ -49,6 +49,13 @@ def serialize_chunk(chunk: Any, chunker: Any, index: int) -> dict[str, Any]:
         "headings": headings,
         "captions": captions,
         "page_numbers": sorted(page_numbers),
+        "provenance_scope": (
+            "page"
+            if page_numbers
+            else "section_only"
+            if headings or source_refs
+            else "unavailable"
+        ),
         "source_refs": source_refs,
         "token_count": chunker.tokenizer.count_tokens(contextualized),
     }
@@ -119,11 +126,13 @@ def build_picture_supplement_chunks(
         text = str(record.get("text", "")).strip()
         if not text:
             continue
-        headings = [
+        context_items = record.get("context_items", []) or []
+        items = [*context_items, *(record.get("items", []) or [])]
+        headings = list(dict.fromkeys(
             str(item.get("text", "")).strip()
-            for item in record.get("items", []) or []
+            for item in items
             if item.get("label") == "section_header" and item.get("text")
-        ]
+        ))
         source_refs = _picture_source_refs(record)
         location = []
         if record.get("page_number") is not None:
@@ -153,6 +162,13 @@ def build_picture_supplement_chunks(
                 if isinstance(record.get("page_number"), (int, float))
                 else []
             ),
+            "provenance_scope": (
+                "page"
+                if isinstance(record.get("page_number"), (int, float))
+                else "section_only"
+                if headings or source_refs
+                else "unavailable"
+            ),
             "source_refs": source_refs,
             "token_count": tokenizer.count_tokens(contextualized),
             "origin": "picture_text",
@@ -168,18 +184,104 @@ def build_picture_supplement_chunks(
     return supplements
 
 
-def _picture_source_refs(record: dict[str, Any]) -> list[dict[str, Any]]:
-    items = record.get("items", []) or []
-    refs = [
-        {
-            "self_ref": str(item.get("self_ref", "")),
-            "label": item.get("label"),
-            "provenance": item.get("provenance", []),
+def build_integrity_warning_supplement_chunks(
+    findings: Iterable[dict[str, Any]],
+    tokenizer: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Surface blocking integrity findings even when Docling omitted the item chunk."""
+    if tokenizer is None:
+        from docling_core.transforms.chunker.tokenizer.huggingface import (
+            HuggingFaceTokenizer,
+        )
+
+        tokenizer = HuggingFaceTokenizer.from_pretrained(
+            model_name=TOKENIZER_MODEL,
+            max_tokens=MAX_TOKENS,
+            model_max_length=1_000_000,
+        )
+
+    supplements: list[dict[str, Any]] = []
+    for finding in findings:
+        if not finding.get("blocks_llm_readiness"):
+            continue
+        if finding.get("requires_standalone_warning") is False:
+            continue
+        warning = str(finding.get("llm_warning") or finding.get("message") or "")
+        message = str(finding.get("message") or "")
+        picture_file = finding.get("picture_file")
+        label = f"Unresolved picture: {picture_file}" if picture_file else "Integrity finding"
+        refs = [
+            {
+                "self_ref": str(ref),
+                "label": "picture" if picture_file else "document",
+                "provenance": (
+                    [{"page_no": page} for page in finding.get("pages", []) or []]
+                ),
+            }
+            for ref in finding.get("source_refs", []) or []
+        ]
+        if not refs:
+            refs = [{"self_ref": "", "label": "document", "provenance": []}]
+        pages = [int(page) for page in finding.get("pages", []) or [] if isinstance(page, (int, float))]
+        text = "\n\n".join(part for part in [warning, message] if part).strip()
+        payload = {
+            "index": 0,
+            "text": text,
+            "contextualized_text": f"{label}\n\n{text}",
+            "headings": [],
+            "captions": [],
+            "page_numbers": pages,
+            "provenance_scope": "page" if pages else "unavailable",
+            "source_refs": refs,
+            "token_count": tokenizer.count_tokens(f"{label}\n\n{text}"),
+            "origin": "semantic_integrity_warning",
+            "integrity_status": "review_required",
+            "integrity_finding_ids": [str(finding.get("id", ""))],
+            "picture_file": picture_file,
         }
-        for item in items
+        supplements.extend(enforce_chunk_limit(payload, tokenizer, MAX_TOKENS))
+
+    for index, payload in enumerate(supplements):
+        payload["index"] = index
+    return supplements
+
+
+def _picture_source_refs(record: dict[str, Any]) -> list[dict[str, Any]]:
+    items = [
+        *(record.get("context_items", []) or []),
+        *(record.get("items", []) or []),
     ]
-    if refs:
-        return refs
+    picture_ref = str(record.get("source_ref", ""))
+    candidates = [
+        *([
+            {
+                "self_ref": picture_ref,
+                "label": "picture",
+                "provenance": (
+                    [{"page_no": int(record["page_number"])}]
+                    if isinstance(record.get("page_number"), (int, float))
+                    else []
+                ),
+            }
+        ] if picture_ref else []),
+        *[
+            {
+                "self_ref": str(item.get("self_ref", "")),
+                "label": item.get("label"),
+                "provenance": item.get("provenance", []),
+            }
+            for item in items
+        ],
+    ]
+    unique_refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in candidates:
+        key = str(ref.get("self_ref", ""))
+        if key and key not in seen:
+            seen.add(key)
+            unique_refs.append(ref)
+    if unique_refs:
+        return unique_refs
     return [
         {
             "self_ref": str(record.get("asset_uri", "")),

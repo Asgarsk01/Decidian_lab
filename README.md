@@ -83,8 +83,8 @@ The service should show `healthy`. Open:
 1. Select `standard`, `scanned`, or `visual`.
 2. Upload one supported local document.
 3. Select **Parse document**.
-4. Inspect the Summary, Markdown, JSON, Chunks, Tables, Pictures, and
-   Evaluation tabs. HTML and page-preview tabs are intentionally empty because
+4. Inspect the Summary, Markdown, JSON, Core chunks, Visual OCR, Tables,
+   Pictures, and Evaluation tabs. HTML and page-preview tabs are intentionally empty because
    those large debug artifacts are not produced.
 5. Record quality scores if required.
 6. Select **Prepare complete output ZIP**, then download the generated ZIP. It
@@ -142,8 +142,9 @@ unchanged: OCR, table mode, cell matching, heading hierarchy, image scale, and
 picture-text extraction remain enabled.
 
 - Keeps `document.md`, `document.json`, `document.raw.md`, `document.txt`,
-  `chunks.jsonl`, `picture_text.jsonl`, `manifest.json`, `evaluation.json`,
-  `pictures/`, table CSV, and table HTML.
+  `chunks.jsonl`, `picture_chunks.jsonl`, `picture_text.jsonl`,
+  `semantic_integrity.json`, `visual_integrity.json`, `manifest.json`,
+  `evaluation.json`, `pictures/`, table CSV, and table HTML.
 - Skips page PNGs, generated page-preview assets, normal table PNGs,
   `document.html`, `document_preview.html`, and persistent `result.zip` files.
 - Keeps table-fragment evidence only when a continued table was repaired.
@@ -203,7 +204,10 @@ document.md
 document.raw.md
 document.txt
 chunks.jsonl
+picture_chunks.jsonl
 picture_text.jsonl
+semantic_integrity.json
+visual_integrity.json
 evaluation.json
 assets/
 pictures/
@@ -226,14 +230,20 @@ repaired_table_evidence/
   explicit continued-table rows and one-letter wrapped table headers, protects
   source-code comments from becoming headings, and restores structured text
   found inside picture regions.
-- `chunks.jsonl` contains HybridChunker document chunks plus provenance-labelled
-  picture-text supplement chunks. Supplement chunks preserve the source page,
-  picture file, and medium/low trust label for diagram-derived text.
-- `picture_text.jsonl` records the best available text for exported PDF picture
+- `chunks.jsonl` is the **core** HybridChunker feed: document text and tables
+  only. Its readiness is controlled by structural/table integrity findings.
+- `picture_chunks.jsonl` is a separate visual-only feed containing accepted
+  picture-text chunks and standalone warnings for uncovered qualifying images.
+  It is never appended to `chunks.jsonl`, so low-trust visual OCR cannot block a
+  clean core text/table feed.
+- `picture_text.jsonl` records the best available text for exported picture
   regions. Records with `source: docling_structured` preserve Docling child-item
   text and provenance and are labelled medium trust in Markdown. Tesseract runs
   only as a fallback and produces `source: tesseract_ocr`, labelled low trust.
-  Both remain supporting visual context rather than authoritative requirements.
+  A quality filter rejects sparse/repetitive OCR residue before it is injected
+  into Markdown or emitted as a visual chunk.
+- `semantic_integrity.json` describes the core document/table gate;
+  `visual_integrity.json` describes independent visual OCR and coverage risk.
 - `evaluation.json` begins as `pending` and is updated when UI scores are saved.
 - `repaired_table_evidence/` contains pre-merge table fragment images and
   metadata only when continued-table repair happened.

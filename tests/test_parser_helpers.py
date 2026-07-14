@@ -3,13 +3,20 @@ from __future__ import annotations
 import json
 
 from decidian_docling.postprocess import (
+    _has_useful_ocr_text,
     clean_markdown_for_llm,
     extract_picture_text,
+    extract_picture_text_with_coverage,
     inject_picture_ocr,
+    inject_picture_integrity_warnings,
     inject_picture_text,
     normalize_markdown_export,
 )
-from decidian_docling.parser import _model_dump, _remove_redundant_page_assets
+from decidian_docling.parser import (
+    _model_dump,
+    _normalize_table_dataframe,
+    _remove_redundant_page_assets,
+)
 
 
 def test_normalize_markdown_export_decodes_common_entities() -> None:
@@ -36,6 +43,13 @@ def test_clean_markdown_splits_fused_headings_and_demotes_field_labels() -> None
     assert "####### Width:" not in cleaned
     assert "#### 7.15.4 Credit Note from DMS\n#### 7.15.5 Functionality Scope" in cleaned
     assert r"\# of Virtual Machines (VMs)" in cleaned
+
+
+def test_clean_markdown_removes_empty_heading_without_removing_figure_reference() -> None:
+    cleaned = clean_markdown_for_llm("### \n\n![Diagram](assets/diagram.png)\n")
+
+    assert "###" not in cleaned
+    assert "![Diagram](assets/diagram.png)" in cleaned
 
 
 def test_clean_markdown_demotes_false_headings_and_infers_numbered_levels() -> None:
@@ -322,6 +336,215 @@ def test_picture_text_enrichment_is_non_fatal(tmp_path) -> None:
     assert any("unexpected error" in warning for warning in warnings)
 
 
+def test_picture_coverage_marks_ocr_unavailable_as_unverified(monkeypatch, tmp_path) -> None:
+    pictures = tmp_path / "pictures"
+    pictures.mkdir()
+    (pictures / "picture-0001.png").write_bytes(b"image")
+    document_json = tmp_path / "document.json"
+    document_json.write_text(
+        json.dumps(
+            {
+                "pictures": [
+                    {
+                        "self_ref": "#/pictures/0",
+                        "image": {
+                            "uri": "assets/architecture.png",
+                            "size": {"width": 800, "height": 600},
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("decidian_docling.postprocess.shutil.which", lambda _: None)
+    warnings: list[str] = []
+
+    records, coverage = extract_picture_text_with_coverage(
+        pictures,
+        document_json,
+        tmp_path / "picture_text.jsonl",
+        warnings,
+    )
+
+    assert records == []
+    assert coverage[0]["qualifying"] is True
+    assert coverage[0]["coverage_status"] == "ocr_unavailable"
+    assert any("tesseract executable not found" in warning for warning in warnings)
+
+
+def test_picture_coverage_records_ocr_text_and_below_threshold_image(monkeypatch, tmp_path) -> None:
+    from decidian_docling import postprocess
+
+    pictures = tmp_path / "pictures"
+    pictures.mkdir()
+    (pictures / "picture-0001.png").write_bytes(b"image")
+    (pictures / "picture-0002.png").write_bytes(b"logo")
+    document_json = tmp_path / "document.json"
+    document_json.write_text(
+        json.dumps(
+            {
+                "pictures": [
+                    {
+                        "self_ref": "#/pictures/0",
+                        "image": {"uri": "assets/diagram.png", "size": {"width": 800, "height": 600}},
+                    },
+                    {
+                        "self_ref": "#/pictures/1",
+                        "image": {"uri": "assets/logo.png", "size": {"width": 20, "height": 20}},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Completed:
+        returncode = 0
+        stdout = "Decision workflow\n"
+        stderr = ""
+
+    monkeypatch.setattr(postprocess.shutil, "which", lambda _: "tesseract")
+    monkeypatch.setattr(postprocess.subprocess, "run", lambda *args, **kwargs: Completed())
+    records, coverage = extract_picture_text_with_coverage(
+        pictures,
+        document_json,
+        tmp_path / "picture_text.jsonl",
+        [],
+    )
+
+    assert records[0]["source"] == "tesseract_ocr"
+    assert records[0]["source_ref"] == "#/pictures/0"
+    assert [item["coverage_status"] for item in coverage] == ["ocr_text", "below_threshold"]
+
+
+def test_ocr_record_inherits_nearest_section_heading_context(monkeypatch, tmp_path) -> None:
+    from decidian_docling import postprocess
+
+    pictures = tmp_path / "pictures"
+    pictures.mkdir()
+    (pictures / "picture-0001.png").write_bytes(b"image")
+    document_json = tmp_path / "document.json"
+    document_json.write_text(
+        json.dumps(
+            {
+                "texts": [
+                    {
+                        "self_ref": "#/texts/1",
+                        "label": "section_header",
+                        "text": "8.2 Architecture",
+                        "level": 2,
+                    }
+                ],
+                "body": {
+                    "children": [
+                        {"$ref": "#/texts/1"},
+                        {"$ref": "#/pictures/0"},
+                    ]
+                },
+                "pictures": [
+                    {
+                        "self_ref": "#/pictures/0",
+                        "image": {"uri": "assets/diagram.png", "size": {"width": 800, "height": 600}},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Completed:
+        returncode = 0
+        stdout = "Service layer\n"
+        stderr = ""
+
+    monkeypatch.setattr(postprocess.shutil, "which", lambda _: "tesseract")
+    monkeypatch.setattr(postprocess.subprocess, "run", lambda *args, **kwargs: Completed())
+    records, _coverage = extract_picture_text_with_coverage(
+        pictures,
+        document_json,
+        tmp_path / "picture_text.jsonl",
+        [],
+    )
+
+    assert records[0]["context_items"][0]["text"] == "8.2 Architecture"
+
+
+def test_picture_coverage_distinguishes_empty_failed_and_missing_assets(monkeypatch, tmp_path) -> None:
+    from decidian_docling import postprocess
+
+    pictures = tmp_path / "pictures"
+    pictures.mkdir()
+    (pictures / "picture-0001.png").write_bytes(b"image")
+    (pictures / "picture-0002.png").write_bytes(b"image")
+    document_json = tmp_path / "document.json"
+    document_json.write_text(
+        json.dumps(
+            {
+                "pictures": [
+                    {"image": {"uri": "assets/empty.png", "size": {"width": 800, "height": 600}}},
+                    {"image": {"uri": "assets/fail.png", "size": {"width": 800, "height": 600}}},
+                    {"image": {"uri": "assets/missing.png", "size": {"width": 800, "height": 600}}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Empty:
+        returncode = 0
+        stdout = "\n"
+        stderr = ""
+
+    class Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "failed"
+
+    results = [Empty(), Failed()]
+    monkeypatch.setattr(postprocess.shutil, "which", lambda _: "tesseract")
+    monkeypatch.setattr(postprocess.subprocess, "run", lambda *args, **kwargs: results.pop(0))
+    _records, coverage = extract_picture_text_with_coverage(
+        pictures,
+        document_json,
+        tmp_path / "picture_text.jsonl",
+        [],
+    )
+
+    assert [item["coverage_status"] for item in coverage] == [
+        "ocr_empty",
+        "ocr_failed",
+        "missing_exported_asset",
+    ]
+
+
+def test_unresolved_picture_warning_is_injected_next_to_the_image() -> None:
+    markdown = "![Diagram](assets/diagram.png)\n"
+    result = inject_picture_integrity_warnings(
+        markdown,
+        [
+            {
+                "qualifying": True,
+                "coverage_status": "ocr_empty",
+                "asset_uri": "assets/diagram.png",
+            }
+        ],
+    )
+
+    assert "![Diagram](assets/diagram.png)\n\n> SEMANTIC INTEGRITY WARNING" in result
+
+
+def test_table_dataframe_export_removes_markdown_presentation() -> None:
+    import pandas as pd
+
+    normalized = _normalize_table_dataframe(
+        pd.DataFrame([["**GET**", "__Users__"]], columns=["**Method**", "**Name**"])
+    )
+
+    assert list(normalized.columns) == ["Method", "Name"]
+    assert normalized.iloc[0].tolist() == ["GET", "Users"]
+
+
 def test_ocr_residue_is_not_emitted(monkeypatch, tmp_path) -> None:
     from decidian_docling import postprocess
 
@@ -355,6 +578,40 @@ def test_ocr_noise_lines_are_removed_without_dropping_short_ui_labels(monkeypatc
 
     assert record is not None
     assert record["text"] == "Add Spectator\nAI"
+
+
+def test_ocr_quality_filter_rejects_repeated_short_token_noise() -> None:
+    noise = "LJ\nee a\na ss DO DO\nGe Ge Gee\nGee Geel ieee Gere"
+
+    assert not _has_useful_ocr_text(noise)
+
+
+def test_ocr_quality_filter_rejects_garbled_short_word_soup() -> None:
+    assert not _has_useful_ocr_text("Ate pes eee Ser")
+
+
+def test_low_quality_ocr_is_auditable_rejection(monkeypatch, tmp_path) -> None:
+    from decidian_docling import postprocess
+
+    image = tmp_path / "image.png"
+    image.write_bytes(b"not-a-real-image")
+
+    class Completed:
+        returncode = 0
+        stdout = "LJ\nee a\na ss DO DO\nGe Ge Gee\nGee Geel ieee Gere"
+        stderr = ""
+
+    monkeypatch.setattr(postprocess.subprocess, "run", lambda *args, **kwargs: Completed())
+    warnings: list[str] = []
+
+    assert postprocess._ocr_picture(image, {}, "tesseract", warnings) is None
+    assert warnings == ["Picture OCR rejected for image.png: low-quality text"]
+
+
+def test_ocr_quality_filter_keeps_multiword_architecture_labels() -> None:
+    useful = "React SPA Frontend\nExpress Backend\nPostgreSQL\nAI"
+
+    assert _has_useful_ocr_text(useful)
 
 
 def test_model_dump_preserves_json_lists_and_page_asset_cleanup(tmp_path) -> None:

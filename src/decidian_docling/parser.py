@@ -4,6 +4,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from .chunking import (
     MAX_TOKENS,
     TOKENIZER_MODEL,
     build_chunks,
+    build_integrity_warning_supplement_chunks,
     build_picture_supplement_chunks,
     write_chunks_jsonl,
 )
@@ -33,11 +35,18 @@ from .models import (
 )
 from .postprocess import (
     clean_markdown_for_llm,
-    extract_picture_text,
+    extract_picture_text_with_coverage,
+    inject_picture_integrity_warnings,
     inject_picture_text,
     normalize_markdown_export,
 )
 from .profiles import build_pdf_pipeline_options, get_profile
+from .semantic_integrity import (
+    add_picture_integrity_findings,
+    annotate_chunks_with_integrity,
+    apply_pdf_semantic_integrity,
+    empty_integrity_report,
+)
 from .validation import MAX_FILE_SIZE, validate_input
 
 DEFAULT_OUTPUT_DIR = Path(os.getenv("DECIDIAN_OUTPUT_DIR", "output"))
@@ -101,6 +110,29 @@ def _base_manifest(
             "ocr": "Docling OcrAutoOptions (RapidOCR on the CPU image)",
         },
         "profile": profile_settings.to_dict(),
+        "llm_readiness": "ready",
+        "visual_readiness": "ready",
+        "provenance_scope": "unavailable",
+        "semantic_integrity": {
+            "summary": {
+                "verified": 0,
+                "repaired_high_confidence": 0,
+                "review_required": 0,
+                "preserved": 0,
+            },
+            "finding_count": 0,
+            "artifact": None,
+        },
+        "visual_integrity": {
+            "summary": {
+                "verified": 0,
+                "repaired_high_confidence": 0,
+                "review_required": 0,
+                "preserved": 0,
+            },
+            "finding_count": 0,
+            "artifact": None,
+        },
         "chunking": None,
         "stage_timings": {},
         "conversion": {
@@ -231,6 +263,7 @@ def _export_items(
             stem = f"table-{table_count:04d}"
             try:
                 dataframe = element.export_to_dataframe(doc=document)
+                dataframe = _normalize_table_dataframe(dataframe)
                 dataframe.to_csv(tables_dir / f"{stem}.csv", index=False)
                 dataframe.to_html(tables_dir / f"{stem}.html", index=False)
             except Exception as exc:
@@ -239,6 +272,29 @@ def _export_items(
                 )
 
     return element_count, table_count, picture_count, table_items
+
+
+def _normalize_table_dataframe(dataframe: Any) -> Any:
+    """Remove Markdown presentation syntax from LLM-facing table exports."""
+    def normalize(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        value = re.sub(r"(?<!\\)\*\*(.+?)(?<!\\)\*\*", r"\1", value)
+        value = re.sub(r"(?<!\\)__(.+?)(?<!\\)__", r"\1", value)
+        return value.replace(r"\*", "*").replace(r"\_", "_").strip()
+
+    dataframe = dataframe.copy()
+    dataframe.columns = [normalize(str(column)) for column in dataframe.columns]
+    return dataframe.apply(lambda column: column.map(normalize))
+
+
+def _document_provenance_scope(chunks: list[dict[str, Any]]) -> str:
+    scopes = {str(chunk.get("provenance_scope", "unavailable")) for chunk in chunks}
+    if "section_only" in scopes:
+        return "section_only"
+    if "page" in scopes:
+        return "page"
+    return "unavailable"
 
 
 def _export_table_images(
@@ -312,13 +368,66 @@ def _export_repaired_table_evidence(
     return exported
 
 
+def _export_semantic_integrity_evidence(
+    document: Any,
+    table_items: dict[int, Any],
+    integrity_report: dict[str, Any],
+    evidence_dir: Path,
+    warnings: list[str],
+) -> int:
+    findings = [
+        finding
+        for finding in integrity_report.get("findings", []) or []
+        if finding.get("status") in {"repaired_high_confidence", "review_required"}
+        and finding.get("table_numbers")
+    ]
+    if not findings:
+        return 0
+
+    from .artifacts import write_json
+
+    exported = 0
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    for index, finding in enumerate(findings, start=1):
+        finding_dir = evidence_dir / f"{finding.get('id') or f'finding-{index:04d}'}"
+        finding_dir.mkdir(parents=True, exist_ok=True)
+        fragments: list[dict[str, Any]] = []
+        for table_number in finding.get("table_numbers", []):
+            element = table_items.get(int(table_number))
+            if element is None:
+                continue
+            filename = f"table-fragment-{int(table_number):04d}.png"
+            try:
+                image = element.get_image(document)
+                if image is not None:
+                    image.save(finding_dir / filename, "PNG")
+                    fragments.append(
+                        {
+                            "table_number": int(table_number),
+                            "file": filename,
+                        }
+                    )
+            except Exception as exc:
+                warnings.append(
+                    "Could not export semantic-integrity evidence for "
+                    f"table {table_number}: {exc}"
+                )
+        metadata = dict(finding)
+        metadata["evidence_type"] = "semantic_integrity_table_fragments"
+        metadata["fragments"] = fragments
+        write_json(finding_dir / "metadata.json", metadata)
+        if fragments:
+            exported += 1
+    return exported
+
+
 def _export_document(
     conversion_result: Any,
     run_dir: Path,
     source_extension: str,
     warnings: list[str],
     stage_timings: dict[str, Any],
-) -> tuple[dict[str, int], dict[str, Any]]:
+) -> tuple[dict[str, int], dict[str, Any], dict[str, Any]]:
     from docling_core.types.doc import ImageRefMode
 
     document = conversion_result.document
@@ -340,6 +449,11 @@ def _export_document(
 
     table_repair_records: list[dict[str, Any]] = []
     table_header_repair_records: list[dict[str, str]] = []
+    semantic_document = document
+    semantic_integrity_report = empty_integrity_report(
+        "pdf" if source_extension == ".pdf" else source_extension.lstrip(".") or "document"
+    )
+    visual_integrity_report = empty_integrity_report("visual")
 
     def export_markdown() -> None:
         document.save_as_markdown(
@@ -351,9 +465,67 @@ def _export_document(
             raw_markdown_path.read_text(encoding="utf-8")
         )
         raw_markdown_path.write_text(raw_markdown, encoding="utf-8")
+
+        nonlocal semantic_document, semantic_integrity_report
+        repaired_raw_markdown = raw_markdown
+        if source_extension == ".pdf":
+            semantic_markdown_path = run_dir / ".document.semantic.raw.md"
+            try:
+                semantic_document, semantic_integrity_report = (
+                    apply_pdf_semantic_integrity(document, document_data, warnings)
+                )
+                semantic_document.save_as_markdown(
+                    semantic_markdown_path,
+                    artifacts_dir=assets_dir,
+                    image_mode=ImageRefMode.REFERENCED,
+                )
+                repaired_raw_markdown = normalize_markdown_export(
+                    semantic_markdown_path.read_text(encoding="utf-8")
+                )
+            except Exception as exc:
+                warnings.append(
+                    "PDF semantic integrity Markdown regeneration skipped after "
+                    f"unexpected error: {exc}"
+                )
+                semantic_document = document
+                semantic_integrity_report = {
+                    "schema_version": "1.0",
+                    "scope": "pdf",
+                    "llm_readiness": "review_required",
+                    "summary": {
+                        "verified": 0,
+                        "repaired_high_confidence": 0,
+                        "review_required": 1,
+                        "preserved": 0,
+                    },
+                    "findings": [
+                        {
+                            "id": "si-0001",
+                            "category": "integrity_markdown_regeneration_exception",
+                            "status": "review_required",
+                            "message": "Semantic integrity Markdown regeneration failed open; baseline Docling Markdown was preserved.",
+                            "rationale": [str(exc)],
+                            "table_indexes": [],
+                            "table_numbers": [],
+                            "source_table_refs": [],
+                            "pages": [],
+                            "affected_artifacts": ["document.md", "chunks.jsonl"],
+                            "source_refs": [],
+                            "provenance_scope": "unavailable",
+                            "llm_warning": (
+                                "SEMANTIC INTEGRITY WARNING: Integrity analysis failed. "
+                                "Do not use this parse for unattended decision extraction."
+                            ),
+                            "blocks_llm_readiness": True,
+                        }
+                    ],
+                }
+            finally:
+                semantic_markdown_path.unlink(missing_ok=True)
+
         markdown_path.write_text(
             clean_markdown_for_llm(
-                raw_markdown,
+                repaired_raw_markdown,
                 document_data if source_extension == ".pdf" else None,
                 warnings,
                 table_repair_records,
@@ -395,7 +567,7 @@ def _export_document(
         stage_timings,
         "item_export",
         lambda: _export_items(
-            document,
+            semantic_document,
             run_dir / "pictures",
             run_dir / "tables",
             warnings,
@@ -412,7 +584,7 @@ def _export_document(
             stage_timings,
             "table_image_export",
             lambda: _export_table_images(
-                document,
+                semantic_document,
                 table_items,
                 run_dir / "tables",
                 warnings,
@@ -432,7 +604,7 @@ def _export_document(
             stage_timings,
             "repaired_table_evidence_export",
             lambda: _export_repaired_table_evidence(
-                document,
+                semantic_document,
                 table_items,
                 table_repair_records,
                 run_dir / "repaired_table_evidence",
@@ -448,25 +620,33 @@ def _export_document(
         )
 
     picture_text_records: list[dict[str, Any]] = []
+    picture_coverage: list[dict[str, Any]] = []
     picture_text_path = run_dir / "picture_text.jsonl"
-    if source_extension == ".pdf" and picture_count:
-        picture_text_records = _run_stage(
+    if picture_count:
+        picture_text_records, picture_coverage = _run_stage(
             stage_timings,
             "picture_text_extraction",
-            lambda: extract_picture_text(
+            lambda: extract_picture_text_with_coverage(
                 run_dir / "pictures",
                 run_dir / "document.json",
                 picture_text_path,
                 warnings,
             ),
         )
+        visual_integrity_report = add_picture_integrity_findings(
+            visual_integrity_report,
+            picture_coverage,
+        )
         _run_stage(
             stage_timings,
             "picture_text_markdown_injection",
             lambda: markdown_path.write_text(
-                inject_picture_text(
-                    markdown_path.read_text(encoding="utf-8"),
-                    picture_text_records,
+                inject_picture_integrity_warnings(
+                    inject_picture_text(
+                        markdown_path.read_text(encoding="utf-8"),
+                        picture_text_records,
+                    ),
+                    picture_coverage,
                 ),
                 encoding="utf-8",
             ),
@@ -476,31 +656,79 @@ def _export_document(
         _mark_skipped(
             stage_timings,
             "picture_text_extraction",
-            "not a PDF or no pictures detected",
+            "no pictures detected",
         )
         _mark_skipped(
             stage_timings,
             "picture_text_markdown_injection",
-            "not a PDF or no picture text records",
+            "no pictures detected",
         )
 
-    def export_chunks() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        chunks, chunking_config = build_chunks(document)
+    _run_stage(
+        stage_timings,
+        "semantic_integrity_export",
+        lambda: write_json(run_dir / "semantic_integrity.json", semantic_integrity_report),
+    )
+    _run_stage(
+        stage_timings,
+        "visual_integrity_export",
+        lambda: write_json(run_dir / "visual_integrity.json", visual_integrity_report),
+    )
+    semantic_evidence_count = _run_stage(
+        stage_timings,
+        "semantic_integrity_evidence_export",
+        lambda: _export_semantic_integrity_evidence(
+            semantic_document,
+            table_items,
+            semantic_integrity_report,
+            run_dir / "semantic_integrity_evidence",
+            warnings,
+        ),
+    )
+
+    def export_chunks() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        core_chunks, chunking_config = build_chunks(semantic_document)
         picture_supplements = build_picture_supplement_chunks(picture_text_records)
-        base_chunk_count = len(chunks)
-        chunks.extend(picture_supplements)
-        for index, chunk in enumerate(chunks):
+        integrity_supplements = build_integrity_warning_supplement_chunks(
+            visual_integrity_report.get("findings", []) or []
+        )
+        annotate_chunks_with_integrity(core_chunks, semantic_integrity_report)
+        visual_chunks = [*picture_supplements, *integrity_supplements]
+        annotate_chunks_with_integrity(visual_chunks, visual_integrity_report)
+        for index, chunk in enumerate(core_chunks):
+            chunk["index"] = index
+        for index, chunk in enumerate(visual_chunks):
             chunk["index"] = index
         chunking_config.update(
             {
-                "base_document_chunks": base_chunk_count,
+                "base_document_chunks": len(core_chunks),
                 "picture_supplement_chunks": len(picture_supplements),
+                "visual_integrity_warning_supplement_chunks": len(integrity_supplements),
+                "visual_chunks_artifact": "picture_chunks.jsonl",
+                "provenance_scope": _document_provenance_scope(core_chunks),
+                "semantic_integrity": {
+                    "llm_readiness": semantic_integrity_report.get("llm_readiness"),
+                    "finding_count": len(
+                        semantic_integrity_report.get("findings", []) or []
+                    ),
+                },
+                "visual_integrity": {
+                    "llm_readiness": visual_integrity_report.get("llm_readiness"),
+                    "finding_count": len(
+                        visual_integrity_report.get("findings", []) or []
+                    ),
+                },
             }
         )
-        write_chunks_jsonl(run_dir / "chunks.jsonl", chunks)
-        return chunks, chunking_config
+        write_chunks_jsonl(run_dir / "chunks.jsonl", core_chunks)
+        write_chunks_jsonl(run_dir / "picture_chunks.jsonl", visual_chunks)
+        return core_chunks, visual_chunks, chunking_config
 
-    chunks, chunking_config = _run_stage(stage_timings, "chunking", export_chunks)
+    chunks, visual_chunks, chunking_config = _run_stage(
+        stage_timings,
+        "chunking",
+        export_chunks,
+    )
 
     removed_page_assets, removed_page_asset_bytes = _run_stage(
         stage_timings,
@@ -519,6 +747,13 @@ def _export_document(
         "repaired_tables": len(table_repair_records),
         "table_header_fragments_repaired": len(table_header_repair_records),
         "repaired_table_evidence": repaired_evidence_count,
+        "semantic_integrity_findings": len(
+            semantic_integrity_report.get("findings", []) or []
+        ),
+        "semantic_integrity_evidence": semantic_evidence_count,
+        "visual_integrity_findings": len(
+            visual_integrity_report.get("findings", []) or []
+        ),
         "pictures": picture_count,
         "picture_structured_items": sum(
             record.get("source") == "docling_structured"
@@ -528,9 +763,28 @@ def _export_document(
             record.get("source") == "tesseract_ocr"
             for record in picture_text_records
         ),
+        "picture_unverified_items": sum(
+            item.get("qualifying")
+            and item.get("coverage_status") not in {"structured_text", "ocr_text"}
+            for item in picture_coverage
+        ),
         "chunks": len(chunks),
+        "picture_chunks": len(visual_chunks),
     }
-    return counts, chunking_config
+    chunking_config["semantic_integrity_report"] = {
+        "llm_readiness": semantic_integrity_report.get("llm_readiness"),
+        "summary": semantic_integrity_report.get("summary", {}),
+    }
+    chunking_config["visual_integrity_report"] = {
+        "llm_readiness": visual_integrity_report.get("llm_readiness"),
+        "summary": visual_integrity_report.get("summary", {}),
+    }
+    return (
+        counts,
+        chunking_config,
+        semantic_integrity_report,
+        visual_integrity_report,
+    )
 
 
 def parse_document(
@@ -629,7 +883,12 @@ def parse_document(
         if conversion_result.status is ConversionStatus.FAILURE:
             manifest["status"] = RunStatus.FAILED.value
         else:
-            counts, chunking_config = _export_document(
+            (
+                counts,
+                chunking_config,
+                semantic_integrity_report,
+                visual_integrity_report,
+            ) = _export_document(
                 conversion_result,
                 run_dir,
                 source.extension,
@@ -638,6 +897,32 @@ def parse_document(
             )
             manifest["counts"].update(counts)
             manifest["chunking"] = chunking_config
+            manifest["provenance_scope"] = chunking_config.get(
+                "provenance_scope",
+                "unavailable",
+            )
+            manifest["llm_readiness"] = semantic_integrity_report.get(
+                "llm_readiness",
+                "ready",
+            )
+            manifest["visual_readiness"] = visual_integrity_report.get(
+                "llm_readiness",
+                "ready",
+            )
+            manifest["semantic_integrity"] = {
+                "summary": semantic_integrity_report.get("summary", {}),
+                "finding_count": len(
+                    semantic_integrity_report.get("findings", []) or []
+                ),
+                "artifact": "semantic_integrity.json",
+            }
+            manifest["visual_integrity"] = {
+                "summary": visual_integrity_report.get("summary", {}),
+                "finding_count": len(
+                    visual_integrity_report.get("findings", []) or []
+                ),
+                "artifact": "visual_integrity.json",
+            }
             manifest["status"] = (
                 RunStatus.PARTIAL_SUCCESS.value
                 if conversion_result.status is ConversionStatus.PARTIAL_SUCCESS
