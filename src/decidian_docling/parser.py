@@ -18,6 +18,8 @@ from .artifacts import (
     initialize_evaluation,
     write_json,
 )
+from .canonical import build_canonical_document, canonical_markdown
+from .clean_chunking import build_clean_chunks, build_review_queue, write_jsonl
 from .chunking import (
     MAX_TOKENS,
     TOKENIZER_MODEL,
@@ -33,6 +35,8 @@ from .models import (
     RunStatus,
     ValidatedInput,
 )
+from .config import GeminiSettings, get_gemini_settings
+from .gemini_review import apply_verified_overlays, run_gemini_review
 from .postprocess import (
     clean_markdown_for_llm,
     extract_picture_text_with_coverage,
@@ -55,6 +59,18 @@ MAX_NUM_PAGES = 500
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _notify_progress(
+    callback: Callable[[dict[str, Any]], None] | None,
+    event: dict[str, Any],
+) -> None:
+    if callback:
+        try:
+            callback(event)
+        except Exception:
+            # UI/observer failures must never affect parsing or artifact integrity.
+            pass
 
 
 def _make_run_dir(output_root: Path, source: ValidatedInput) -> Path:
@@ -102,6 +118,8 @@ def _base_manifest(
             "transformers": _package_version("transformers"),
             "sentence_transformers": _package_version("sentence-transformers"),
             "rapidocr": _package_version("rapidocr"),
+            "google_genai": _package_version("google-genai"),
+            "python_docx": _package_version("python-docx"),
         },
         "models": {
             "chunk_tokenizer": TOKENIZER_MODEL,
@@ -112,6 +130,20 @@ def _base_manifest(
         "profile": profile_settings.to_dict(),
         "llm_readiness": "ready",
         "visual_readiness": "ready",
+        "clean_readiness": "blocked",
+        "ai_review": {
+            "status": "not_configured",
+            "provider": "google_gemini",
+            "model": os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+            "mode": "targeted_two_pass",
+            "candidate_count": 0,
+            "verified_count": 0,
+            "unresolved_count": 0,
+            "estimated_cost_inr": 0.0,
+            "budget_inr": 100.0,
+            "artifact": "gemini_review.json",
+            "events_artifact": "gemini_events.jsonl",
+        },
         "provenance_scope": "unavailable",
         "semantic_integrity": {
             "summary": {
@@ -147,6 +179,8 @@ def _base_manifest(
             "tables": 0,
             "pictures": 0,
             "chunks": 0,
+            "clean_chunks": 0,
+            "review_queue": 0,
         },
         "duration_seconds": None,
         "warnings": [],
@@ -424,13 +458,23 @@ def _export_semantic_integrity_evidence(
 def _export_document(
     conversion_result: Any,
     run_dir: Path,
-    source_extension: str,
+    source: ValidatedInput,
+    gemini_settings: GeminiSettings,
     warnings: list[str],
     stage_timings: dict[str, Any],
-) -> tuple[dict[str, int], dict[str, Any], dict[str, Any]]:
+    ai_progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[
+    dict[str, int],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    str,
+]:
     from docling_core.types.doc import ImageRefMode
 
     document = conversion_result.document
+    source_extension = source.extension
     assets_dir = Path("assets")
     _run_stage(
         stage_timings,
@@ -686,6 +730,104 @@ def _export_document(
         ),
     )
 
+    canonical_result = _run_stage(
+        stage_timings,
+        "canonical_reconciliation",
+        lambda: build_canonical_document(
+            source.path,
+            document_data,
+            semantic_integrity_report,
+            visual_integrity_report,
+            picture_text_records,
+        ),
+    )
+    if source_extension not in {".docx", ".pdf"}:
+        canonical_result.candidates.clear()
+        canonical_result.document["summary"]["ai_candidates"] = 0
+    write_json(run_dir / "canonical_document.json", canonical_result.document)
+
+    # Persist a deterministic safe feed before external review starts. If the AI
+    # job is cancelled or the container exits, core DOCX/PDF content is still usable.
+    preliminary_clean_chunks, _ = build_clean_chunks(
+        canonical_result.document,
+        [],
+    )
+    preliminary_review_queue = build_review_queue(
+        canonical_result.document,
+        canonical_result.candidates,
+        {},
+    )
+    write_jsonl(run_dir / "clean_chunks.jsonl", preliminary_clean_chunks)
+    write_jsonl(run_dir / "review_queue.jsonl", preliminary_review_queue)
+    _notify_progress(
+        ai_progress_callback,
+        {
+            "event": "local_processing_completed",
+            "phase": "local_processing",
+            "message": (
+                f"Local parsing completed. {len(canonical_result.candidates)} AI "
+                "candidate(s) detected; deterministic clean chunks are already saved."
+            ),
+            "detected_candidates": len(canonical_result.candidates),
+            "detected_diagrams": sum(
+                item.get("kind") == "diagram"
+                for item in canonical_result.candidates
+            ),
+            "preliminary_clean_chunks": len(preliminary_clean_chunks),
+        },
+    )
+
+    ai_report, ai_results, verified_supplements = _run_stage(
+        stage_timings,
+        "gemini_review",
+        lambda: run_gemini_review(
+            canonical_result.candidates,
+            run_dir,
+            gemini_settings,
+            run_dir.parent / ".ai_cache",
+            ai_progress_callback,
+        ),
+    )
+    apply_verified_overlays(
+        canonical_result.document,
+        canonical_result.candidates,
+        ai_results,
+    )
+    write_json(run_dir / "canonical_document.json", canonical_result.document)
+    write_json(run_dir / "gemini_review.json", ai_report)
+
+    canonical_review_markdown = canonical_markdown(canonical_result.document)
+    markdown_path.write_text(
+        inject_picture_integrity_warnings(
+            inject_picture_text(canonical_review_markdown, picture_text_records),
+            picture_coverage,
+        ),
+        encoding="utf-8",
+    )
+
+    clean_chunks, clean_chunking_config = _run_stage(
+        stage_timings,
+        "clean_chunking",
+        lambda: build_clean_chunks(
+            canonical_result.document,
+            verified_supplements,
+        ),
+    )
+    review_queue = build_review_queue(
+        canonical_result.document,
+        canonical_result.candidates,
+        ai_results,
+    )
+    write_jsonl(run_dir / "clean_chunks.jsonl", clean_chunks)
+    write_jsonl(run_dir / "review_queue.jsonl", review_queue)
+    clean_readiness = (
+        "blocked"
+        if not clean_chunks
+        else "partial_ready"
+        if review_queue
+        else "ready"
+    )
+
     def export_chunks() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         core_chunks, chunking_config = build_chunks(semantic_document)
         picture_supplements = build_picture_supplement_chunks(picture_text_records)
@@ -770,6 +912,11 @@ def _export_document(
         ),
         "chunks": len(chunks),
         "picture_chunks": len(visual_chunks),
+        "clean_chunks": len(clean_chunks),
+        "review_queue": len(review_queue),
+        "canonical_blocks": len(canonical_result.document.get("blocks", []) or []),
+        "ai_candidates": len(canonical_result.candidates),
+        "ai_verified_claims": len(verified_supplements),
     }
     chunking_config["semantic_integrity_report"] = {
         "llm_readiness": semantic_integrity_report.get("llm_readiness"),
@@ -779,11 +926,14 @@ def _export_document(
         "llm_readiness": visual_integrity_report.get("llm_readiness"),
         "summary": visual_integrity_report.get("summary", {}),
     }
+    chunking_config["clean"] = clean_chunking_config
     return (
         counts,
         chunking_config,
         semantic_integrity_report,
         visual_integrity_report,
+        ai_report,
+        clean_readiness,
     )
 
 
@@ -791,9 +941,12 @@ def parse_document(
     input_path: Path,
     profile: ParsingProfile | str = ParsingProfile.STANDARD,
     output_root: Path = DEFAULT_OUTPUT_DIR,
+    ai_review: bool | None = None,
+    ai_progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> RunResult:
     source = validate_input(Path(input_path))
     settings = get_profile(profile)
+    gemini_settings = get_gemini_settings(ai_review)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     run_dir = _make_run_dir(output_root, source)
@@ -803,6 +956,17 @@ def parse_document(
     initialize_evaluation(run_dir)
     started = time.perf_counter()
     stage_timings = manifest["stage_timings"]
+    _notify_progress(
+        ai_progress_callback,
+        {
+            "event": "parse_started",
+            "phase": "local_processing",
+            "message": "Running local Docling conversion and deterministic reconciliation.",
+            "model": gemini_settings.model,
+            "thinking_level": gemini_settings.thinking_level,
+            "budget_inr": gemini_settings.budget_inr,
+        },
+    )
 
     lock = FileLock(str(output_root.resolve() / ".parse.lock"))
     try:
@@ -888,12 +1052,16 @@ def parse_document(
                 chunking_config,
                 semantic_integrity_report,
                 visual_integrity_report,
+                ai_report,
+                clean_readiness,
             ) = _export_document(
                 conversion_result,
                 run_dir,
-                source.extension,
+                source,
+                gemini_settings,
                 manifest["warnings"],
                 stage_timings,
+                ai_progress_callback,
             )
             manifest["counts"].update(counts)
             manifest["chunking"] = chunking_config
@@ -909,6 +1077,40 @@ def parse_document(
                 "llm_readiness",
                 "ready",
             )
+            manifest["clean_readiness"] = clean_readiness
+            manifest["ai_review"] = {
+                "status": ai_report.get("status"),
+                "provider": ai_report.get("provider", "google_gemini"),
+                "model": ai_report.get("model", gemini_settings.model),
+                "mode": ai_report.get("mode", "targeted_two_pass"),
+                "candidate_count": ai_report.get("candidate_count", 0),
+                "verified_count": ai_report.get("verified_count", 0),
+                "unresolved_count": ai_report.get("unresolved_count", 0),
+                "verified_claim_count": ai_report.get("verified_claim_count", 0),
+                "duration_seconds": ai_report.get("duration_seconds", 0.0),
+                "selected_candidate_count": ai_report.get("selected_candidate_count", 0),
+                "selected_diagram_count": ai_report.get("selected_diagram_count", 0),
+                "deferred_candidate_count": ai_report.get("deferred_candidate_count", 0),
+                "prepared_candidate_count": ai_report.get("prepared_candidate_count", 0),
+                "prepared_evidence_count": ai_report.get("prepared_evidence_count", 0),
+                "attempted_candidate_count": ai_report.get("attempted_candidate_count", 0),
+                "request_count": ai_report.get("request_count", 0),
+                "extraction_request_count": ai_report.get("extraction_request_count", 0),
+                "verification_request_count": ai_report.get("verification_request_count", 0),
+                "diagram_request_count": ai_report.get("diagram_request_count", 0),
+                "verification_count": ai_report.get("verification_count", 0),
+                "submitted_candidate_count": ai_report.get("submitted_candidate_count", 0),
+                "submitted_candidate_ids": ai_report.get("submitted_candidate_ids", []),
+                "submitted_evidence_count": ai_report.get("submitted_evidence_count", 0),
+                "submitted_evidence_paths": ai_report.get("submitted_evidence_paths", []),
+                "usage": ai_report.get("usage", {}),
+                "estimated_cost_inr": ai_report.get("estimated_cost_inr", 0.0),
+                "budget_inr": ai_report.get("budget_inr", gemini_settings.budget_inr),
+                "budget_remaining_inr": ai_report.get("budget_remaining_inr", gemini_settings.budget_inr),
+                "stop_reason": ai_report.get("stop_reason"),
+                "artifact": "gemini_review.json",
+                "events_artifact": "gemini_events.jsonl",
+            }
             manifest["semantic_integrity"] = {
                 "summary": semantic_integrity_report.get("summary", {}),
                 "finding_count": len(

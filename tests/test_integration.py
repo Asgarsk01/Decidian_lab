@@ -48,6 +48,10 @@ def test_real_docling_exports(
         "document.txt",
         "chunks.jsonl",
         "picture_chunks.jsonl",
+        "canonical_document.json",
+        "clean_chunks.jsonl",
+        "review_queue.jsonl",
+        "gemini_review.json",
         "evaluation.json",
     ]:
         assert (result.run_dir / required).is_file(), required
@@ -61,6 +65,15 @@ def test_real_docling_exports(
     assert chunks
     assert all(chunk["token_count"] <= 1200 for chunk in chunks)
     assert result.manifest["counts"]["elements"] > 0
+    clean_chunks = [
+        json.loads(line)
+        for line in (result.run_dir / "clean_chunks.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert clean_chunks
+    assert all(chunk["token_count"] <= 1200 for chunk in clean_chunks)
+    assert result.manifest["clean_readiness"] in {"ready", "partial_ready"}
 
     if fixture_name == "pdf":
         assert list((result.run_dir / "tables").glob("*.csv"))

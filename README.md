@@ -1,7 +1,7 @@
 # Decidian Docling Lab
 
 A Docker-first, CPU-only laboratory for testing how Docling parses documents
-before Decidian adds cloud storage, queues, a database, or LLM extraction.
+before Decidian adds cloud storage, queues, a database, or final LLM decision extraction.
 
 The project provides:
 
@@ -14,8 +14,80 @@ The project provides:
 - Immutable local output folders with JSON, Markdown, text, chunks, picture
   evidence, table data, diagnostics, and evaluation data.
 
-Nothing is uploaded to R2, GCP, or another cloud service. No document content is
-sent to an LLM.
+Docling conversion remains local. When Gemini defence is enabled and
+`GEMINI_API_KEY` is configured, only qualifying diagram images and targeted
+DOCX/PDF ambiguity evidence are sent to the Google Gemini API for guarded,
+targeted review. Raw documents are not uploaded wholesale. No content is sent
+to R2, a database, or another storage service.
+
+## Gemini defence configuration
+
+Copy `.env.example` to `.env` (a blank local `.env` is created for development)
+and add the API key locally:
+
+```dotenv
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.5-flash
+DECIDIAN_AI_REVIEW=false
+GEMINI_THINKING_LEVEL=medium
+GEMINI_BUDGET_INR=100
+GEMINI_TIMEOUT_SECONDS=45
+GEMINI_MAX_RETRIES=1
+GEMINI_MAX_CONCURRENCY=1
+GEMINI_MAX_CANDIDATES=5
+GEMINI_MAX_REQUESTS_PER_RUN=7
+GEMINI_MAX_RUNTIME_SECONDS=300
+GEMINI_MAX_TOTAL_TOKENS=60000
+GEMINI_MAX_OUTPUT_TOKENS_PER_REQUEST=8192
+GEMINI_MAX_VERIFICATIONS=2
+GEMINI_REQUEST_RESERVE_INR=20
+GEMINI_USD_INR_RATE=100
+GEMINI_INPUT_PRICE_USD_PER_MILLION=1.5
+GEMINI_OUTPUT_PRICE_USD_PER_MILLION=9
+```
+
+`.env` is ignored by Git and never included in run ZIPs or manifests. The
+Streamlit UI and CLI allow Gemini review to be disabled for a parse. If the key
+is absent or the API fails, local Docling artifacts still complete and all
+unresolved evidence is excluded from the clean feed.
+
+Gemini model interactions use the Developer API `v1beta` Interactions endpoint.
+The default guarded profile uses Gemini 3.5 Flash with medium thinking, one
+request at a time, at most five selected candidates, seven total request
+attempts, two verification calls, 60,000 total reported tokens, an 8,192-token
+response allowance, five minutes of AI wall time, and an estimated ₹100 run budget. Before each request the client
+checks the request, token, runtime, budget, and ₹20 reserve guards. The verifier
+is invoked only when extraction produced evidence-bearing claims and the
+verification allowance remains. Authentication, model, billing, quota, or
+shared response-schema failures open a circuit breaker so the same systemic
+failure is not repeated for every diagram.
+
+The rupee total is an operator estimate calculated from reported input,
+visible-output, and thought-token usage with configurable model prices and USD
+to INR rate. Provider billing remains authoritative, and one in-flight response
+can settle above the estimate; the request reserve reduces that risk.
+
+Usage and spend are recorded as soon as Gemini returns response metadata,
+before JSON parsing or schema validation. Consequently, incomplete, truncated,
+or malformed paid responses still increase the dashboard totals and retain a
+redacted raw-output audit. Provider `incomplete` status, schema rejection, API
+failure, retries, and guard stops are separate journal events.
+
+When AI is enabled, the UI requires explicit approval of the displayed run
+budget and shows a live dashboard with selected versus detected diagrams,
+current candidate and pass, API attempts, verification calls, tokens, thought
+tokens, diagram API passes (including retries and verification), elapsed time,
+estimated spend, remaining budget, guard utilization, and an event-by-event
+activity table. The same append-only audit is written to
+`gemini_events.jsonl`.
+
+Dashboard state is retained in the Streamlit session and can be reconstructed
+from `gemini_events.jsonl` after a rerun or server restart. Evidence is labelled
+separately as source, selected/prepared, and actually submitted. Only selected
+evidence is copied into `ai_evidence/`; request events record the exact files
+sent. Extremely wide diagrams are tiled, while complex ERDs retain the full
+image plus two readable evidence tiles. The extraction schema is deliberately
+bounded to the highest-value labels, components, relationships, and claims.
 
 ## Requirements
 
@@ -144,7 +216,9 @@ picture-text extraction remain enabled.
 - Keeps `document.md`, `document.json`, `document.raw.md`, `document.txt`,
   `chunks.jsonl`, `picture_chunks.jsonl`, `picture_text.jsonl`,
   `semantic_integrity.json`, `visual_integrity.json`, `manifest.json`,
-  `evaluation.json`, `pictures/`, table CSV, and table HTML.
+  `canonical_document.json`, `clean_chunks.jsonl`, `review_queue.jsonl`,
+  `gemini_review.json`, `evaluation.json`, `pictures/`, targeted AI evidence,
+  table CSV, and table HTML.
 - Skips page PNGs, generated page-preview assets, normal table PNGs,
   `document.html`, `document_preview.html`, and persistent `result.zip` files.
 - Keeps table-fragment evidence only when a continued table was repaired.
@@ -208,6 +282,10 @@ picture_chunks.jsonl
 picture_text.jsonl
 semantic_integrity.json
 visual_integrity.json
+canonical_document.json
+clean_chunks.jsonl
+review_queue.jsonl
+gemini_review.json
 evaluation.json
 assets/
 pictures/
@@ -244,6 +322,23 @@ repaired_table_evidence/
   into Markdown or emitted as a visual chunk.
 - `semantic_integrity.json` describes the core document/table gate;
   `visual_integrity.json` describes independent visual OCR and coverage risk.
+- `canonical_document.json` is the typed DOCX/PDF representation used to
+  distinguish headings, prose, lists, tables, code/configuration, and pictures.
+- `clean_chunks.jsonl` is the only downstream decision-LLM feed. It contains
+  deterministic verified blocks plus claims accepted by both Gemini passes.
+- `review_queue.jsonl` contains every unresolved or excluded candidate with its
+  source evidence path/hash and recommended human action.
+- `gemini_review.json` records schema-validated extraction and independent
+  verification results, timings, usage, prompt/schema versions, and evidence
+  hashes. It never records the API key.
+- `gemini_events.jsonl` is the append-only operational journal behind the live
+  dashboard. It records candidate selection, request/pass starts and finishes,
+  reported token usage, estimated spend, retries, guard stops, and completion.
+- Native DOCX paragraph/table references use stable `docx://...` identifiers;
+  aligned Docling `#/texts/...` and `#/tables/...` references are retained
+  alongside them when available.
+- `clean_readiness` is `ready`, `partial_ready`, or `blocked`. A partial feed is
+  safe to ingest as a verified subset but is not a complete-document result.
 - `evaluation.json` begins as `pending` and is updated when UI scores are saved.
 - `repaired_table_evidence/` contains pre-merge table fragment images and
   metadata only when continued-table repair happened.

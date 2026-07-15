@@ -6,6 +6,8 @@ htmlcov/
 *.py[cod]
 *.egg-info/
 .ruff_cache/
+.env
+.ai_cache/
 
 input/*
 !input/.gitkeep
@@ -13,4 +15,3 @@ output/*
 !output/.gitkeep
 work/*
 !work/.gitkeep
-

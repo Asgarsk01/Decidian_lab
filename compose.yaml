@@ -7,6 +7,9 @@ services:
       target: runtime
     ports:
       - "8501:8501"
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./input:/data/input
       - ./output:/data/output
@@ -32,6 +35,9 @@ services:
       dockerfile: Dockerfile
       target: runtime
     profiles: ["tools"]
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./input:/data/input
       - ./output:/data/output

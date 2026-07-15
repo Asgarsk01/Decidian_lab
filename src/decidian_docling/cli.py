@@ -34,16 +34,25 @@ OutputOption = Annotated[
         dir_okay=True,
     ),
 ]
+AiReviewOption = Annotated[
+    bool | None,
+    typer.Option(
+        "--ai-review/--no-ai-review",
+        help="Run targeted two-pass Gemini review; defaults to DECIDIAN_AI_REVIEW.",
+    ),
+]
 def _run_one(
     input_file: Path,
     profile: ParsingProfile,
     output: Path,
+    ai_review: bool | None,
 ) -> bool:
     try:
         result = parse_document(
             input_file,
             profile=profile,
             output_root=output,
+            ai_review=ai_review,
         )
     except HarnessError as exc:
         typer.secho(f"ERROR: {exc}", fg=typer.colors.RED, err=True)
@@ -63,6 +72,14 @@ def _run_one(
     )
     typer.echo(f"Artifacts: {result.run_dir}")
     typer.echo(f"LLM readiness: {result.manifest.get('llm_readiness', 'ready')}")
+    typer.echo(f"Clean readiness: {result.manifest.get('clean_readiness', 'blocked')}")
+    ai_status = result.manifest.get("ai_review") or {}
+    typer.echo(
+        "Gemini review: "
+        f"{ai_status.get('status', 'not_configured')} "
+        f"({ai_status.get('verified_count', 0)} verified, "
+        f"{ai_status.get('unresolved_count', 0)} unresolved)"
+    )
     integrity = result.manifest.get("semantic_integrity") or {}
     if integrity.get("finding_count"):
         typer.echo(
@@ -89,9 +106,10 @@ def parse_command(
     ],
     profile: ProfileOption = ParsingProfile.STANDARD,
     output: OutputOption = DEFAULT_OUTPUT_DIR,
+    ai_review: AiReviewOption = None,
 ) -> None:
     """Parse one document and write the extraction artifact set."""
-    if not _run_one(input_file, profile, output):
+    if not _run_one(input_file, profile, output, ai_review):
         raise typer.Exit(code=1)
 
 
@@ -109,6 +127,7 @@ def batch_command(
     ],
     profile: ProfileOption = ParsingProfile.STANDARD,
     output: OutputOption = DEFAULT_OUTPUT_DIR,
+    ai_review: AiReviewOption = None,
 ) -> None:
     """Parse supported files in one directory sequentially."""
     files = sorted(
@@ -126,7 +145,7 @@ def batch_command(
 
     failures = 0
     for input_file in files:
-        if not _run_one(input_file, profile, output):
+        if not _run_one(input_file, profile, output, ai_review):
             failures += 1
 
     typer.echo(
