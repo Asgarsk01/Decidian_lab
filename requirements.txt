@@ -1,0 +1,12 @@
+streamlit>=1.40,<2
+python-dotenv>=1.0,<2
+SQLAlchemy>=2.0,<3
+pydantic>=2.8,<3
+docling>=2.50,<3
+python-docx>=1.1,<2
+lxml>=5.0,<7
+Pillow>=10,<13
+google-genai>=1.0,<2
+rapidfuzz>=3.9,<4
+orjson>=3.10,<4
+

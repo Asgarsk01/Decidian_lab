@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.streamlit/
+data/*.db
+storage/uploads/*/
+storage/parsed/*/
+storage/images/*/
+storage/image_analysis/*/
+storage/extraction_packets/*/
+storage/decision_outputs/*/
+
